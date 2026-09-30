@@ -570,8 +570,8 @@ async function doStopService() {
         </template>
       </v-tooltip>
 
-      <!-- Dynamic optimization (ProBalance) -->
-      <v-tooltip :text="t('pb')" location="bottom">
+      <!-- Dynamic optimization (ProBalance) — flagged as unstable in the UI -->
+      <v-tooltip :text="t('pb') + ' · ' + t('pbUnstable')" location="bottom">
         <template #activator="{ props }">
           <v-btn v-bind="props" icon="mdi-tune-vertical" variant="text" color="purple-accent-2" @click="pbPanelOpen = true" />
         </template>

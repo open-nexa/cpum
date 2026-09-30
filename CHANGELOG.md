@@ -25,6 +25,9 @@ x64 and ARM64 NSIS installers, the signed updater artifacts, `latest.json` and
 
 ### Changed
 
+- The dynamic optimization (ProBalance) panel is now flagged as **Unstable** in
+  the UI, both in the toolbar tooltip and as a chip next to the panel title, so
+  it is clear the engine is still experimental.
 - **Breaking for existing installations**: the bundle identifier moved from
   `com.eason.cpum` to `com.open-nexa.cpum`, which also moves the data directory
   from `%APPDATA%\com.eason.cpum` to `%APPDATA%\com.open-nexa.cpum`.

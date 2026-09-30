@@ -314,6 +314,21 @@ onUnmounted(stopPolling);
       <v-card-title class="d-flex align-center pa-3 pb-2">
         <v-icon icon="mdi-tune-vertical" class="mr-2" color="primary" />
         <span class="text-h6">{{ t('pbTitle') }}</span>
+        <!-- Unstable marker: the engine is still experimental, so surface it in the UI -->
+        <v-tooltip :text="t('pbUnstableHint')" location="bottom">
+          <template #activator="{ props }">
+            <v-chip
+              v-bind="props"
+              color="warning"
+              size="x-small"
+              variant="tonal"
+              class="ml-2 font-weight-medium"
+            >
+              <v-icon start size="x-small" icon="mdi-flask-outline" />
+              {{ t('pbUnstable') }}
+            </v-chip>
+          </template>
+        </v-tooltip>
         <!-- Engine state chip lives next to the title (not in its own card row) -->
         <v-chip
           :color="engineStateColor"
