@@ -1,0 +1,56 @@
+version: 2
+
+updates:
+  # The cargo workspace lives under src-tauri/, so its Cargo.lock is not at the
+  # repository root.
+  - package-ecosystem: cargo
+    directory: /src-tauri
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:17"
+    open-pull-requests-limit: 10
+    groups:
+      # One PR for the whole `windows` crate family: it is a single dependency
+      # split across ~200 feature crates, and 200 separate PRs is not a review
+      # queue, it is a denial of service.
+      windows:
+        patterns:
+          - "windows*"
+      rust-patch:
+        patterns:
+          - "*"
+        update-types:
+          - patch
+        exclude-patterns:
+          - "windows*"
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:17"
+    open-pull-requests-limit: 10
+    groups:
+      frontend-dev:
+        dependency-type: development
+        update-types:
+          - minor
+          - patch
+      frontend-prod:
+        dependency-type: production
+        update-types:
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:17"
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns:
+          - "*"

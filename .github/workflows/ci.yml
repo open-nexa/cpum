@@ -1,0 +1,217 @@
+name: CI
+
+# Fast checks for every commit and pull request: Rust formatting / lints /
+# tests, the frontend type check and build, a full NSIS bundle, and the
+# dependency and secret scans. Everything that compiles runs on Windows -
+# CPU Manager is Windows-only, and `cpum-core` reaches the Win32 API without a
+# cfg gate, so there is no Linux or macOS job to have.
+#
+# The Rust jobs build `cpum_service.exe` first, on purpose. `tauri.conf.json`
+# declares `target/release/cpum_service.exe` as a bundle resource and
+# `tauri-build` (the desktop crate's build script) fails when the file is
+# missing, so a plain `cargo check --workspace` on a clean clone does not even
+# get to the type checking. That is also why the service lives in its own
+# workspace member crate: it can be built before the desktop crate exists.
+#
+# The desktop binary and the service binary both set `test = false` (neither is
+# a unit-test harness), so all Rust tests live in `cpum-core`.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: cargo fmt --check
+        working-directory: src-tauri
+        run: cargo fmt --all -- --check
+
+  rust:
+    name: clippy + tests
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          # The cargo workspace lives under src-tauri/, so its target directory
+          # is src-tauri/target, not the repository root's.
+          cache-on-failure: true
+          workspaces: src-tauri -> target
+
+      - name: Build the Windows service binary
+        # See the header comment: the desktop crate's build script requires
+        # target/release/cpum_service.exe to exist before it will run.
+        working-directory: src-tauri
+        run: cargo build --release --locked -p cpum-service --bin cpum_service
+
+      # -D warnings: without this clippy exits 0 on a warning and the job is
+      # decorative.
+      - name: cargo clippy
+        working-directory: src-tauri
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test --locked -p cpum-core
+
+  frontend:
+    name: frontend (typecheck + build)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # npm ci, not npm install: it fails outright when package-lock.json and
+      # package.json disagree.
+      - name: npm ci
+        run: npm ci
+
+      # vue-tsc --noEmit && vite build
+      - name: typecheck + build
+        run: npm run build
+
+  bundle:
+    name: NSIS bundle
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          workspaces: src-tauri -> target
+
+      - name: npm ci
+        run: npm ci
+
+      - name: Build the Windows service binary
+        working-directory: src-tauri
+        run: cargo build --release --locked -p cpum-service --bin cpum_service
+
+      # createUpdaterArtifacts is off: there is no signing key on a pull
+      # request, and `tauri build` would otherwise try to sign and fail. The
+      # release workflow turns it back on with TAURI_SIGNING_PRIVATE_KEY.
+      - name: tauri build
+        run: npx tauri build --bundles nsis --config "{\"bundle\":{\"createUpdaterArtifacts\":false}}"
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: nsis-installer
+          path: src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+  audit:
+    name: dependency audit
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      # RUSTSEC advisories for everything in src-tauri/Cargo.lock.
+      # Unmaintained / unsound advisories are informational (exit 0);
+      # vulnerabilities fail the job.
+      #
+      # RUSTSEC-2024-0429 is ignored deliberately: glib 0.18 rides in with the
+      # gtk 0.18 stack tauri depends on for its Linux build, the advisory is
+      # only patched in glib >= 0.20, and there is no version to move to until
+      # upstream tauri migrates. Nothing in this workspace touches
+      # glib::VariantStrIter, the unsound iterator it describes - and on
+      # Windows, the only platform this app supports, that stack is not even
+      # compiled. Drop the --ignore once Cargo.lock pins glib >= 0.20.
+      - name: cargo audit
+        working-directory: src-tauri
+        run: cargo audit --ignore RUSTSEC-2024-0429
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: npm ci
+        run: npm ci
+
+      # Runtime dependencies only (--omit=dev), and only high / critical fail
+      # the build: a moderate advisory deep in the build chain costs more to fix
+      # than it is worth, and dependabot can follow those slowly.
+      - name: npm audit
+        run: npm audit --omit=dev --audit-level=high
+
+  secrets:
+    name: secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # Free for public repositories. If this repository ever becomes private,
+      # add GITLEAKS_LICENSE (organisations need a paid licence) as a secret.
+      #
+      # Scans the whole history, so a finding cannot be undone by deleting the
+      # line: it has to be named in `.gitleaks.toml` instead.
+      - uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+
+  dependency-review:
+    name: dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/dependency-review-action@v4

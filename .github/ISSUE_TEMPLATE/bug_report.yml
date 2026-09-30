@@ -1,0 +1,98 @@
+name: Bug report
+description: Something does not behave the way the README says it does.
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. Please search existing issues first -
+        including closed ones - before opening a new one.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part is misbehaving?
+      options:
+        - Desktop app (process view, affinity editor, rules)
+        - ProBalance
+        - Windows service (`CpumAffinityService`)
+        - Privileged bridge / elevation
+        - Installer or auto-update
+        - Website or documentation
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Release tag, or the commit hash if you built from source.
+      placeholder: v0.1.1 / bffca60
+    validations:
+      required: true
+
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version and architecture
+      description: |
+        CPU Manager is Windows-only, and several features depend on the build:
+        network I/O counters need Windows 11 24H2 or later.
+      placeholder: Windows 11 24H2, x86_64 / Windows 10 22H2, ARM64
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Numbered, and short enough that someone else can follow it.
+      placeholder: |
+        1. Create a rule for ...
+        2. Apply rules
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: |
+        For anything involving the service, the output of these three commands
+        is usually enough to tell a service problem from a rule problem.
+      placeholder: |
+        sc.exe qc CpumAffinityService
+        sc.exe query CpumAffinityService
+        Get-Content "$env:APPDATA\com.open-nexa.cpum\affinity_rules.json"
+      render: powershell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing issues
+          required: true
+        - label: The target process is not PPL-protected (csrss, anti-cheat, some anti-virus) - those cannot be modified at any privilege level
+          required: false
+        - label: I checked the README section for this feature
+          required: false

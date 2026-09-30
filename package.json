@@ -1,0 +1,42 @@
+{
+  "name": "cpum",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Windows desktop app for CPU topology inspection and per-process affinity, priority and ProBalance management",
+  "license": "MIT",
+  "author": "open-nexa",
+  "homepage": "https://github.com/open-nexa/cpum",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/open-nexa/cpum.git"
+  },
+  "bugs": {
+    "url": "https://github.com/open-nexa/cpum/issues"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "vue-tsc --noEmit",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@mdi/font": "^7.4.47",
+    "@mdi/js": "^7.4.47",
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-opener": "^2",
+    "@tauri-apps/plugin-updater": "^2",
+    "vue": "^3.5.13",
+    "vuetify": "^4.1.9"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "sass-embedded": "^1.102.0",
+    "typescript": "~5.6.2",
+    "vite": "^6.0.3",
+    "vite-plugin-vuetify": "^2.1.3",
+    "vue-tsc": "^2.1.10"
+  }
+}

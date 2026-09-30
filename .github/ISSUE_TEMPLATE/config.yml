@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Question or usage help
+    url: https://github.com/open-nexa/cpum/discussions
+    about: Ask how to do something, or whether a behaviour is expected.
+  - name: Security issue
+    url: https://github.com/open-nexa/cpum/security/advisories/new
+    about: Report a vulnerability privately. Please do not open a public issue.
+  - name: Contributing
+    url: https://github.com/open-nexa/cpum/blob/main/CONTRIBUTING.md
+    about: Build setup, house rules and a list of good first issues.

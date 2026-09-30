@@ -1,0 +1,10 @@
+# Configuration shared by every language in .github/workflows/codeql.yml.
+#
+# Only non-owned code is excluded: node_modules is not ours, dist is generated,
+# and the cargo target directory holds copies of every dependency's source.
+name: cpum-codeql-config
+
+paths-ignore:
+  - '**/node_modules'
+  - dist
+  - src-tauri/target

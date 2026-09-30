@@ -1,0 +1,48 @@
+# Line-ending policy.
+#
+# The repository stores every text file with LF in the object database, and the
+# working tree is LF too - that is what cargo, rustfmt, vite and the CI runners
+# write, and it is the only convention that keeps the checkout byte-identical to
+# the index on every platform. Without this file the checkout follows the host's
+# `core.autocrlf`, so a Windows clone gets CRLF working-tree files while
+# `git diff` still reports them as unmodified; the first tool that rewrites one
+# of those files (rustfmt, an editor) flips it to LF and the file shows up as
+# fully modified. Pinning `eol=lf` removes that mismatch.
+#
+# `text=auto` makes Git normalise line endings on the way in, so a commit made
+# from a CRLF working tree still stores LF. `eol=lf` then forces the checkout to
+# LF as well.
+* text=auto eol=lf
+
+# Windows scripts. Command Prompt's `.bat` parser has known traps around LF-only
+# line endings (a `goto` or a labelled block can be misread), so keep those as
+# CRLF explicitly. `.ps1` is listed for the same reason: it is executed by
+# Windows PowerShell on this project's only target platform.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Not text: never touched by end-of-line conversion. Listed explicitly (rather
+# than relying on auto-detection) so a future binary format is not accidentally
+# normalised.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.ico binary
+*.icns binary
+*.gif binary
+*.ttf binary
+*.woff binary
+*.woff2 binary
+*.jar binary
+*.dll binary
+*.exe binary
+*.so binary
+*.dylib binary
+*.bin binary
+
+# SVG and NSIS sources are text; they are listed so auto-detection never has to
+# guess.
+*.svg text
+*.nsh text

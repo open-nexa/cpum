@@ -1,0 +1,68 @@
+name: CodeQL
+
+# Advanced setup for code scanning. Default setup cannot be configured, and it
+# would try to autobuild the Rust workspace - which needs cpum_service.exe to
+# exist first (see ci.yml). Turn default setup off in Settings > Advanced
+# Security > Code scanning before merging this, otherwise both run and the
+# analyses collide.
+#
+# Every language here supports build-mode none: Rust, TypeScript and the
+# workflow files are all scanned from source.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly, Monday 04:17 UTC - off the hour so it does not queue behind other
+    # scheduled workflows.
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: rust
+            build-mode: none
+          - language: javascript-typescript
+            build-mode: none
+          - language: actions
+            build-mode: none
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          config-file: .github/codeql/codeql-config.yml
+          # Drop this line to fall back to the default query suite.
+          queries: security-extended
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:${{ matrix.language }}

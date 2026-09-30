@@ -1,0 +1,60 @@
+name: Feature request
+description: Something the app cannot do today, that it reasonably should.
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. Please search existing issues first -
+        including closed ones - before opening a new one.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: |
+        What are you trying to do that CPU Manager makes hard or impossible?
+        Describe the situation, not the solution - it keeps the options open.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like
+      description: Optional. If you already have a shape in mind, describe it.
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: |
+        Including "I do it by hand in Task Manager". Knowing what you already
+        tried tells us how much the gap actually costs.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Desktop app (process view, affinity editor, rules)
+        - ProBalance
+        - Windows service (`CpumAffinityService`)
+        - Privileged bridge / elevation
+        - Installer or auto-update
+        - Documentation
+        - Not sure
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing issues
+          required: true
