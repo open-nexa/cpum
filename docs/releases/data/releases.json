@@ -1,0 +1,52 @@
+[
+  {
+    "tag_name": "v0.1.0",
+    "name": "v0.1.0",
+    "html_url": "https://github.com/open-nexa/cpum/releases/tag/v0.1.0",
+    "published_at": "2026-09-30T16:09:27Z",
+    "prerelease": false,
+    "draft": false,
+    "assets": [
+      {
+        "name": "CPU-Manager_v0.1.0_windows-arm64-setup.exe",
+        "browser_download_url": "https://github.com/open-nexa/cpum/releases/download/v0.1.0/CPU-Manager_v0.1.0_windows-arm64-setup.exe",
+        "size": 6562737
+      },
+      {
+        "name": "CPU-Manager_v0.1.0_windows-x64-setup.exe",
+        "browser_download_url": "https://github.com/open-nexa/cpum/releases/download/v0.1.0/CPU-Manager_v0.1.0_windows-x64-setup.exe",
+        "size": 6931888
+      },
+      {
+        "name": "CPU.Manager_0.1.0_arm64-setup.exe",
+        "browser_download_url": "https://github.com/open-nexa/cpum/releases/download/v0.1.0/CPU.Manager_0.1.0_arm64-setup.exe",
+        "size": 6562737
+      },
+      {
+        "name": "CPU.Manager_0.1.0_arm64-setup.exe.sig",
+        "browser_download_url": "https://github.com/open-nexa/cpum/releases/download/v0.1.0/CPU.Manager_0.1.0_arm64-setup.exe.sig",
+        "size": 424
+      },
+      {
+        "name": "CPU.Manager_0.1.0_x64-setup.exe",
+        "browser_download_url": "https://github.com/open-nexa/cpum/releases/download/v0.1.0/CPU.Manager_0.1.0_x64-setup.exe",
+        "size": 6931888
+      },
+      {
+        "name": "CPU.Manager_0.1.0_x64-setup.exe.sig",
+        "browser_download_url": "https://github.com/open-nexa/cpum/releases/download/v0.1.0/CPU.Manager_0.1.0_x64-setup.exe.sig",
+        "size": 424
+      },
+      {
+        "name": "latest.json",
+        "browser_download_url": "https://github.com/open-nexa/cpum/releases/download/v0.1.0/latest.json",
+        "size": 1273
+      },
+      {
+        "name": "SHA256SUMS.txt",
+        "browser_download_url": "https://github.com/open-nexa/cpum/releases/download/v0.1.0/SHA256SUMS.txt",
+        "size": 698
+      }
+    ]
+  }
+]

@@ -1,0 +1,155 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit configuration for CPU Manager.
+# Layout, build order and house rules live in AGENTS.md / CONTRIBUTING.md.
+
+language: "en-US"
+early_access: false
+
+tone_instructions: >
+  Be direct and concrete: cite the file and line, say what breaks and why, and skip
+  praise, summaries of the diff itself, and style-only nitpicks. This is a Windows-only
+  app, so "tested on Linux" is not a useful suggestion.
+
+reviews:
+  # Advisory, never a merge gate: no blocking review, no red commit status. Merge
+  # requirements belong to branch protection, which this file cannot configure.
+  profile: "chill"
+  request_changes_workflow: false
+  review_status: true
+  review_progress: true
+  commit_status: true
+  fail_commit_status: false
+  high_level_summary: true
+  collapse_walkthrough: true
+  changed_files_summary: true
+  sequence_diagrams: false
+  estimate_code_review_effort: false
+  poem: false
+  in_progress_fortune: false
+  auto_review:
+    enabled: true
+    drafts: false
+    auto_incremental_review: true
+    base_branches:
+      - main
+
+  path_filters:
+    - "!**/target/**"
+    - "!**/node_modules/**"
+    - "!**/dist/**"
+    - "!src-tauri/gen/**"
+    - "!**/Cargo.lock"
+    - "!**/package-lock.json"
+    - "!**/*.min.js"
+    - "!**/*.map"
+    - "!**/*.png"
+    - "!**/*.ico"
+    - "!**/*.svg"
+    - "!docs/releases/data/**"
+    - "!**/.DS_Store"
+
+  path_instructions:
+    - path: "**/*.rs"
+      instructions: |
+        Rust, edition 2021 with default rustfmt; `cargo clippy -D warnings` gates CI, so
+        treat any new warning as a build break. Comment in English, including
+        `eprintln!` / `format!` strings. Flag `unwrap` / `expect` / `panic!` on a command
+        path reachable from the GUI — a panic there takes the whole window down.
+
+    - path: "src-tauri/crates/cpum-core/src/**"
+      instructions: |
+        Shared core: rule model, matcher, store, Win32 writes, ProBalance, IPC bridge.
+        It must keep compiling without the `tauri` dependency — the service reuses it.
+        Affinity / CPU-set / priority reads and writes exist exactly once, in
+        `procwin.rs`; flag any reimplementation. Every field added to a persisted or
+        event-sent struct needs `#[serde(default)]`, otherwise files written by an older
+        build fail to deserialize (often silently, because the cache loader uses `.ok()`).
+        This is the only crate with Rust tests; new behaviour needs one.
+
+    - path: "src-tauri/crates/cpum-service/src/**"
+      instructions: |
+        The LocalSystem service: rule daemon, ProBalance runtime, named-pipe privileged
+        bridge, one-shot elevated helper. The service data directory must be resolved
+        through `cpum_core::service_dir::resolve` — arguments baked into the service
+        `ImagePath` only reach the process command line, never `ServiceMain`'s argv, and
+        reading the wrong one silently falls back to `%ProgramData%`. Flag any code that
+        runs with SERVICE privileges on data supplied by an un-elevated caller without
+        checking the bridge token. PPL processes cannot be modified at any privilege
+        level; a failure there is expected, not a bug to work around.
+
+    - path: "src-tauri/src/**"
+      instructions: |
+        Tauri 2 desktop backend. Commands must not block the async runtime and must
+        validate arguments coming from the webview; a new command needs its permission in
+        `capabilities/`. Tauri deserialises command arguments strictly, so a Rust
+        parameter that is not `Option<T>` must never receive `null`. Flag payload structs
+        that miss a field the TypeScript caller reads — the consumer overwrites good data
+        with `undefined`. Only Windows service management may elevate; the app itself
+        stays un-elevated (`asInvoker`).
+
+    - path: "src/**"
+      instructions: |
+        Vue 3 + TypeScript frontend (Vuetify). Every user-visible string goes through the
+        dictionary in `src/i18n.ts` with entries in BOTH `zh-CN` and `en-US` — flag any
+        hardcoded UI text, including inside a composable or a `<script>` block. Comments
+        are English only. Keep Tauri calls in `src/api.ts`, not inline in components.
+        Watch for lost reactivity: do not snapshot reactive state into a plain object or
+        Map for fields that are both displayed and edited.
+
+    - path: "scripts/**"
+      instructions: |
+        Plain Node scripts, no dependencies: `lint-i18n.mjs` guards the locale
+        dictionaries, `snapshot-releases.mjs` refreshes the download-page fallback.
+        `npm run lint:i18n` runs in CI, so it must fail loudly (exit 1) on a real
+        violation and stay silent otherwise — a guard that cries wolf gets deleted.
+
+    - path: "docs/releases/**"
+      instructions: |
+        The GitHub Pages site root. Download links must come from the GitHub releases
+        API's `name` and `browser_download_url` and never be assembled from a filename
+        template: the pipeline publishes two installers per architecture (a canonical
+        `CPU-Manager_<tag>_windows-<arch>-setup.exe` and Tauri's own
+        `CPU.Manager_<version>_<arch>-setup.exe`, which `latest.json` points at), and a
+        template cannot tell them apart. Classification lives only in
+        `assets/releases.js`.
+
+    - path: ".github/workflows/**"
+      instructions: |
+        CI and release workflows, all on windows-latest. Any `cargo check` / `clippy` /
+        `tauri build` step must first build `cpum_service.exe`, because `tauri-build`
+        treats it as a bundle resource and fails when it is missing. Secrets must never be
+        echoed; PowerShell inline blocks are reviewed like the scripts above.
+
+    - path: "**/*.nsh"
+      instructions: |
+        NSIS installer hooks. Migration must only ever READ from the legacy data
+        directories (`com.eason.cpum`, `%ProgramData%\cpum`) and write to the current
+        per-user one. The service flag file drives whether an upgrade recreates the
+        service; a change here usually needs the matching change in `src-tauri/src/lib.rs`.
+
+    - path: "**/*.md"
+      instructions: |
+        Only flag factual drift: commands that no longer exist, paths that moved, version
+        numbers, installer filenames or URLs that disagree with the code or the release
+        workflow. Ignore prose style, line wrapping and wording. Both READMEs must stay in
+        step — a section added to one and not the other is worth flagging.
+
+  tools:
+    clippy:
+      enabled: true
+    actionlint:
+      enabled: true
+    yamllint:
+      enabled: true
+    gitleaks:
+      enabled: true
+
+  pre_merge_checks:
+    override_requested_reviewers_only: false
+    docstrings:
+      mode: "off"
+    issue_assessment:
+      mode: "off"
+    description:
+      mode: "warning"

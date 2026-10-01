@@ -10,6 +10,12 @@ CPU Manager 是一款用于查看 CPU 拓扑、浏览 Windows 进程并管理其
 
 > 项目依赖 Windows API，仅支持 Windows。
 
+[安装](#安装) · [界面截图](#界面截图) · [功能](#功能) · [规则、ProBalance 与服务](#规则probalance-与服务) ·
+[开发](#开发) · [参与贡献](CONTRIBUTING.md) · [路线图](docs/ROADMAP.md) ·
+[更新日志](CHANGELOG.md) · [发布说明](https://open-nexa.github.io/cpum/)
+
+---
+
 ## 功能
 
 - 查看 CPU 拓扑：逻辑处理器、物理核心、SMT 线程、CPU 插槽，以及可检测到的 CCD/Die 信息；保留 Intel 混合架构 P/E 核的区分。
@@ -35,6 +41,62 @@ CPU Manager 是一款用于查看 CPU 拓扑、浏览 Windows 进程并管理其
 5. 如果希望在登录或重启后也自动应用规则与 ProBalance，请在应用内安装 Windows 服务。
 
 修改亲和性可能影响程序的响应速度和吞吐量。对于混合架构 CPU 或运行低延迟负载的电脑，请先谨慎测试掩码设置。ProBalance 仅降级后台进程的优先级，不会终止或硬绑定进程。
+
+## 界面截图
+
+<table>
+  <tr>
+    <td align="center"><img src="screenshots/processes-flat.png" width="420" alt="进程列表（平铺视图）"><br><sub>进程列表 — 平铺视图，右侧为每个 CCD 的亲和性色条</sub></td>
+    <td align="center"><img src="screenshots/processes-tree.png" width="420" alt="进程列表（进程树视图）"><br><sub>进程列表 — 进程树视图</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="screenshots/rules.png" width="420" alt="规则管理器"><br><sub>规则管理器</sub></td>
+    <td align="center"><img src="screenshots/probalance.png" width="420" alt="ProBalance 面板"><br><sub>ProBalance 面板</sub></td>
+  </tr>
+</table>
+
+更多截图与截图规格见 [screenshots/](screenshots/README.md)。
+
+## 安装
+
+请从 [最新发布](https://github.com/open-nexa/cpum/releases/latest) 下载与你 CPU
+架构匹配的安装包；历史版本的下载链接见
+[下载页](https://open-nexa.github.io/cpum/)：
+
+| 架构 | 安装包 |
+| --- | --- |
+| x64 | `CPU-Manager_<版本>_windows-x64-setup.exe` |
+| ARM64 | `CPU-Manager_<版本>_windows-arm64-setup.exe` |
+
+**运行** CPU Manager 需要 Windows 10 或更高版本，以及 WebView2 Runtime（较新的
+Windows 系统已自带）。安装包为 per-user 安装，默认装到 `%LOCALAPPDATA%`，
+安装过程不会请求管理员权限。
+
+### SmartScreen 与校验和
+
+安装包目前还没有 Authenticode 签名——项目正在通过
+[SignPath Foundation](https://signpath.org/) 申请免费证书（申请文案见
+[docs/signpath-foundation-application.md](docs/signpath-foundation-application.md)）。
+在签名证书接入发布流水线之前，首次运行安装包时 Windows 可能提示
+**"Windows 已保护你的电脑"**，请选择 **更多信息 → 仍要运行**。
+
+每个发布都附带 `SHA256SUMS.txt`，可以在运行前先校验下载到的文件：
+
+```powershell
+Get-Content .\SHA256SUMS.txt
+(Get-FileHash .\CPU-Manager_v0.1.0_windows-x64-setup.exe -Algorithm SHA256).Hash.ToLower()
+```
+
+两个哈希值必须一致。若不一致，请删除该文件，切勿运行。
+
+### 升级
+
+**0.1.1 及更早**的安装版本会向项目此前所在的仓库检查更新，因此永远看不到新版本。
+请手动安装一次 **0.2.0**，之后内置的更新器会接管，自动提示后续版本，并在安装前
+校验 minisign 签名。
+
+在 *应用和功能* 中卸载时，若已安装 `CpumAffinityService` 会一并移除。你的规则
+文件保留在 `%APPDATA%\com.open-nexa.cpum\`。
 
 ## 开发环境要求
 
@@ -187,9 +249,15 @@ src-tauri/                        Tauri 桌面二进制
     cpum-service/                 cpum_service.exe（Windows 服务 + ProBalance 运行时）
   installer-hooks.nsh             NSIS 安装钩子：迁移旧版规则文件，仅服务操作提权
 docs/
+  ROADMAP.md                      现状、后续阶段与明确不做的事
   UPDATER.md                      密钥管理、发布产物与校验方式
   signpath-foundation-application.md  申请免费代码签名时使用的申请文本
-.github/                          CI / CodeQL 工作流、Issue 与 PR 模板、dependabot
+  releases/                       下载页（通过 GitHub Pages 发布）
+scripts/
+  lint-i18n.mjs                   校验中英双语言字典是否同步
+  snapshot-releases.mjs           刷新下载页的兜底数据
+screenshots/                      README 截图；规格说明见该目录
+.github/                          CI / CodeQL / Pages 工作流、Issue 与 PR 模板、dependabot
 CONTRIBUTING.md                   构建环境、代码约定与上手任务清单
 SECURITY.md                       权限边界与漏洞上报方式
 CHANGELOG.md                      重要变更（Keep a Changelog 格式）

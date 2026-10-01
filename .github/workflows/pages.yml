@@ -1,0 +1,61 @@
+name: Pages
+
+# Publishes docs/releases/ as the project's GitHub Pages site: the download page
+# plus the release snapshot it falls back to when the GitHub API is unreachable.
+#
+# Only docs/releases/ is uploaded. The rest of docs/ — ROADMAP.md, UPDATER.md,
+# signpath-foundation-application.md — deliberately stays out: it is readable in
+# the repository, and a second copy on the site would only drift from it.
+#
+# One-time setup in Settings -> Pages -> Build and deployment -> Source:
+# "GitHub Actions". Until that is set there is nowhere to deploy to, and this
+# workflow will fail at the deploy step. After it is set, every change under
+# docs/releases/ publishes on its own.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/releases/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never cancel a deploy in flight: a half-uploaded artifact would replace a
+# working site with a broken one, and there is no rollback for that.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: deploy download page
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # pages: write to create the deployment, id-token: write to authenticate
+    # against Pages as this repository rather than with a personal token.
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      # docs/releases/ is the site root, so index.html there is the site's home
+      # page and data/releases.json is served next to it.
+      - name: Upload site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/releases
+
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

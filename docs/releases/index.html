@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CPU Manager — releases</title>
+<meta name="description" content="Download CPU Manager for Windows: installers for x64 and ARM64, with checksums for every release.">
+<link rel="icon" href="https://raw.githubusercontent.com/open-nexa/cpum/main/src-tauri/icons/32x32.png">
+<style>
+  :root {
+    --bg: #ffffff;
+    --panel: #f7f8fa;
+    --panel-hover: #eff1f4;
+    --border: #e4e7ec;
+    --text: #16181d;
+    --muted: #6b7280;
+    --accent: #1668dc;
+    --warn-bg: #faeeda;
+    --warn-border: #ba7517;
+    --warn-text: #633806;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115;
+      --panel: #171a21;
+      --panel-hover: #1e222b;
+      --border: #282d36;
+      --text: #e6e8eb;
+      --muted: #98a1ad;
+      --accent: #4d9dff;
+      --warn-bg: #2a2013;
+      --warn-border: #854f0b;
+      --warn-text: #fac775;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 780px; margin: 0 auto; padding: 0 20px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  header.site { border-bottom: 1px solid var(--border); }
+  header.site .wrap { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; padding-top: 14px; padding-bottom: 14px; }
+  .brand { font-weight: 600; font-size: 16px; letter-spacing: -0.2px; }
+  .brand span { color: var(--muted); font-weight: 400; }
+  header.site nav { display: flex; gap: 18px; font-size: 14px; }
+  header.site nav a { color: var(--muted); }
+
+  h1 { font-size: 34px; line-height: 1.15; letter-spacing: -0.7px; margin: 40px 0 10px; }
+  .lede { font-size: 16px; color: var(--muted); margin: 0 0 28px; }
+  .note {
+    border: 1px solid var(--warn-border);
+    background: var(--warn-bg);
+    color: var(--warn-text);
+    border-radius: 10px;
+    padding: 12px 16px;
+    font-size: 14px;
+    margin: 0 0 32px;
+  }
+  .note strong { font-weight: 600; }
+
+  .release { border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-bottom: 20px; }
+  .release-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .tag { font-size: 20px; font-weight: 600; letter-spacing: -0.3px; }
+  .when { color: var(--muted); font-size: 14px; }
+  .badge {
+    display: inline-block; font-size: 12px; border: 1px solid var(--border);
+    border-radius: 999px; padding: 1px 9px; color: var(--muted); margin-left: 8px;
+  }
+
+  ul.rows { list-style: none; margin: 18px 0 0; padding: 0; }
+  ul.rows li { margin-bottom: 10px; }
+  a.row {
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    padding: 13px 16px; border: 1px solid var(--border); border-radius: 10px;
+    background: var(--panel); text-decoration: none; color: var(--text);
+  }
+  a.row:hover { background: var(--panel-hover); text-decoration: none; }
+  .row-main { min-width: 0; }
+  .row-title { font-size: 15px; font-weight: 600; }
+  .row-sub { font-size: 12px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+  .row-go { flex: none; font-size: 14px; color: var(--accent); }
+
+  .meta { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); font-size: 13px; color: var(--muted); display: flex; gap: 16px; flex-wrap: wrap; }
+
+  h2 { font-size: 18px; margin: 40px 0 10px; }
+  pre {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px 16px; overflow-x: auto; font-size: 13px; line-height: 1.5;
+  }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  footer.site { border-top: 1px solid var(--border); margin-top: 56px; padding: 20px 0 56px; color: var(--muted); font-size: 13px; }
+  .empty { border: 1px dashed var(--border); border-radius: 10px; padding: 20px; color: var(--muted); font-size: 14px; }
+</style>
+</head>
+<body>
+
+<header class="site">
+  <div class="wrap">
+    <div class="brand">CPU Manager <span>releases</span></div>
+    <nav>
+      <a href="https://github.com/open-nexa/cpum">Repository</a>
+      <a href="https://github.com/open-nexa/cpum/releases/latest">Latest release</a>
+      <a href="https://github.com/open-nexa/cpum/blob/main/CHANGELOG.md">Changelog</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <h1>Download CPU Manager</h1>
+  <p class="lede">A Windows desktop app for CPU topology, per-process affinity, priority and
+  ProBalance. Installers are per-user — no administrator rights, no reboot.</p>
+
+  <p class="note" id="smart-screen">
+    <strong>Windows may warn before the first run.</strong> Installers are not
+    Authenticode-signed yet, so SmartScreen can show “Windows protected your PC”.
+    Choose <strong>More info → Run anyway</strong>. Every release ships a
+    <code>SHA256SUMS.txt</code>, so you can check the file before you run it.
+  </p>
+
+  <div id="status" class="empty" hidden></div>
+  <div id="releases">Loading releases…</div>
+
+  <h2>Verify a download</h2>
+  <pre><code>Get-Content .\SHA256SUMS.txt
+(Get-FileHash .\CPU-Manager_v0.1.0_windows-x64-setup.exe -Algorithm SHA256).Hash.ToLower()</code></pre>
+  <p style="font-size:14px;color:var(--muted)">The two hashes must match. If they do not, delete the file.</p>
+
+  <h2>Upgrading</h2>
+  <p style="font-size:14px;color:var(--muted)">Installations of 0.1.1 and older look for updates in the
+  project's previous repository and will never see a new release. Install 0.2.0 once by hand;
+  the built-in updater takes over from there.</p>
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    Download links come straight from the GitHub releases API, so they cannot drift from what is
+    published. CPU Manager is MIT licensed.
+  </div>
+</footer>
+
+<script type="module">
+import { loadReleases, pickInstallers, findKind, formatSize, archLabel } from 'assets/releases.js';
+
+const container = document.getElementById('releases');
+const status = document.getElementById('status');
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[char]);
+}
+
+function formatDate(iso) {
+  if (!iso) return '';
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toISOString().slice(0, 10);
+}
+
+function renderRelease(release) {
+  const installers = pickInstallers(release.assets || []);
+  const checksums = findKind(release.assets || [], 'checksums');
+  const manifest = findKind(release.assets || [], 'manifest');
+
+  const rows = installers.map((row) => `
+      <li>
+        <a class="row" href="${escapeHtml(row.asset.browser_download_url)}">
+          <span class="row-main">
+            <span class="row-title">Windows ${escapeHtml(archLabel(row.arch))}</span><br>
+            <span class="row-sub">${escapeHtml(row.asset.name)}${row.asset.size ? ` · ${escapeHtml(formatSize(row.asset.size))}` : ''}</span>
+          </span>
+          <span class="row-go">Download</span>
+        </a>
+      </li>`).join('');
+
+  const downloads = installers.length
+    ? `<ul class="rows">${rows}</ul>`
+    : '<p style="font-size:14px;color:var(--muted);margin:16px 0 0">This release published no installer.</p>';
+
+  const links = [];
+  if (checksums) links.push(`<a href="${escapeHtml(checksums.browser_download_url)}">SHA256SUMS.txt</a>`);
+  if (manifest) links.push(`<a href="${escapeHtml(manifest.browser_download_url)}">latest.json</a>`);
+  if (release.html_url) links.push(`<a href="${escapeHtml(release.html_url)}">Notes on GitHub</a>`);
+
+  return `
+    <section class="release">
+      <div class="release-head">
+        <div>
+          <span class="tag">${escapeHtml(release.tag_name || 'release')}</span>
+          ${release.prerelease ? '<span class="badge">pre-release</span>' : ''}
+        </div>
+        <span class="when">${escapeHtml(formatDate(release.published_at))}</span>
+      </div>
+      ${downloads}
+      ${links.length ? `<div class="meta">${links.join('')}</div>` : ''}
+    </section>`;
+}
+
+const { releases, source } = await loadReleases();
+
+const visible = releases.filter((release) => !release.draft);
+
+if (source !== 'live') {
+  status.hidden = false;
+  status.textContent = source === 'cache'
+    ? 'Showing the last download of the release list — GitHub did not answer just now.'
+    : source === 'snapshot'
+      ? 'Showing a snapshot of the release list — GitHub did not answer just now, so links may lag behind a brand-new release.'
+      : 'Could not reach GitHub. Open the releases page on github.com instead.';
+}
+
+if (!visible.length) {
+  container.innerHTML = source === 'failed'
+    ? '<p class="empty">No release data available. <a href="https://github.com/open-nexa/cpum/releases">Browse releases on GitHub</a>.</p>'
+    : '<p class="empty">No releases published yet.</p>';
+} else {
+  container.innerHTML = visible.map(renderRelease).join('');
+}
+</script>
+
+</body>
+</html>

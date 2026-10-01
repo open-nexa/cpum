@@ -12,6 +12,37 @@ x64 and ARM64 NSIS installers, the signed updater artifacts, `latest.json` and
 
 ### Added
 
+- Both READMEs now have an **Install** section — until now neither said where the
+  installer comes from — covering the two architectures, the checksum check, the
+  SmartScreen warning shown on unsigned installers, and the fact that 0.1.1 and
+  older have to be upgraded by hand. A navigation line at the top of each README
+  links the rest of the document.
+- A download page at [open-nexa.github.io/cpum](https://open-nexa.github.io/cpum/),
+  published from `docs/releases/` by `.github/workflows/pages.yml`. Links are read
+  from the GitHub releases API and classified in `docs/releases/assets/releases.js`;
+  nothing builds a filename from a template, so a renamed artifact cannot produce a
+  404. There is a `localStorage` cache and a committed snapshot
+  (`docs/releases/data/releases.json`, refreshed with `npm run snapshot:releases`)
+  for when the API is unreachable or rate-limited. The page shows one installer per
+  architecture: the pipeline publishes two (the canonical
+  `CPU-Manager_<tag>_windows-<arch>-setup.exe` plus Tauri's own
+  `CPU.Manager_<version>_<arch>-setup.exe`, which `latest.json` points at), and only
+  the canonical one is offered to humans.
+- `docs/ROADMAP.md`: what is solid, what is not, the next four phases, and a
+  non-goals section with the reason for each one.
+- `npm run lint:i18n` (`scripts/lint-i18n.mjs`), now part of CI. It fails when
+  `zh-CN` and `en-US` in `src/i18n.ts` do not define the same key set, when a static
+  `t('...')` key does not resolve, or when a CJK character appears anywhere outside
+  `src/i18n.ts`. Zero dependencies; it parses the dictionary instead of
+  regex-matching lines, because translation values contain `{}` placeholders.
+- Screenshots in both READMEs at last: `processes-flat.png` (process list with the
+  per-CCD affinity bars), `processes-tree.png`, `rules.png` and `probalance.png`,
+  plus `screenshots/README.md` recording how they were captured so the next set
+  matches.
+- `.coderabbit.yaml`, configured as advisory only (no blocking review, no red
+  commit status) with per-path instructions for the crates that have real
+  constraints.
+
 - Everything needed to work on the project from a fork: `CONTRIBUTING.md`,
   `SECURITY.md`, `CODE_OF_CONDUCT.md`, issue templates, a pull request template,
   Dependabot and a `ci.yml` workflow that runs `cargo fmt --check`,

@@ -10,6 +10,12 @@ CPU Manager is a Windows desktop application for inspecting CPU topology, browsi
 
 > This project uses Windows APIs and is intended for Windows only.
 
+[Install](#install) · [Screenshots](#screenshots) · [Features](#features) · [Rules and ProBalance](#rules-probalance-and-the-service) ·
+[Development](#development) · [Contributing](CONTRIBUTING.md) · [Roadmap](docs/ROADMAP.md) ·
+[Changelog](CHANGELOG.md) · [Release notes](https://open-nexa.github.io/cpum/)
+
+---
+
 ## Features
 
 - Inspect the CPU topology: logical processors, physical cores, SMT threads, packages, and detected CCD/die information. Intel hybrid P/E-core distinction is preserved.
@@ -36,9 +42,67 @@ CPU Manager is a Windows desktop application for inspecting CPU topology, browsi
 
 Changing affinity can affect responsiveness and throughput. Test masks carefully, especially on hybrid CPUs or machines running latency-sensitive workloads. ProBalance downgrades priorities only; it never kills or hard-pins background processes.
 
-## Requirements
+## Screenshots
 
-For development:
+<table>
+  <tr>
+    <td align="center"><img src="screenshots/processes-flat.png" width="420" alt="Process list in flat view"><br><sub>Process list — flat view, with the per-CCD affinity bars</sub></td>
+    <td align="center"><img src="screenshots/processes-tree.png" width="420" alt="Process list in tree view"><br><sub>Process list — tree view</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="screenshots/rules.png" width="420" alt="Rule manager"><br><sub>Rule manager</sub></td>
+    <td align="center"><img src="screenshots/probalance.png" width="420" alt="ProBalance panel"><br><sub>ProBalance panel</sub></td>
+  </tr>
+</table>
+
+More images (and the specification for capturing them) are in [screenshots/](screenshots/README.md).
+
+## Install
+
+Download the installer for your CPU architecture from the
+[latest release](https://github.com/open-nexa/cpum/releases/latest), or pick an
+older one from the [download page](https://open-nexa.github.io/cpum/):
+
+| Architecture | Installer |
+| --- | --- |
+| x64 | `CPU-Manager_<version>_windows-x64-setup.exe` |
+| ARM64 | `CPU-Manager_<version>_windows-arm64-setup.exe` |
+
+To **run** CPU Manager you need Windows 10 or later and the WebView2 Runtime,
+which ships with current Windows installations. The installer is per-user: it
+installs into `%LOCALAPPDATA%` and never asks for administrator rights.
+
+### SmartScreen and checksums
+
+Installers are not Authenticode-signed yet — the project is going through the
+[SignPath Foundation](https://signpath.org/) programme for a free certificate
+(the application text lives in
+[docs/signpath-foundation-application.md](docs/signpath-foundation-application.md)).
+Until a signing certificate is attached to the release pipeline, Windows may show
+**"Windows protected your PC"** the first time you run the installer. Choose
+**More info → Run anyway**.
+
+Every release publishes a `SHA256SUMS.txt`, so you can check what you downloaded
+before running it:
+
+```powershell
+Get-Content .\SHA256SUMS.txt
+(Get-FileHash .\CPU-Manager_v0.1.0_windows-x64-setup.exe -Algorithm SHA256).Hash.ToLower()
+```
+
+The two hashes must match. If they do not, delete the file — do not run it.
+
+### Upgrading
+
+Installations of **0.1.1 and older** check the project's previous repository for
+updates and will never see a new release. Install **0.2.0** once by hand; from
+there the built-in updater takes over and offers every later version
+automatically, verifying a minisign signature before it installs anything.
+
+Uninstalling from *Apps & Features* also removes `CpumAffinityService` if it was
+installed. Your rules stay in `%APPDATA%\com.open-nexa.cpum\`.
+
+## Requirements (development)
 
 - Windows 10 or later
 - Node.js and npm
@@ -200,9 +264,15 @@ src-tauri/                        Tauri desktop binary
   installer-hooks.nsh             NSIS hooks: migrate legacy rule files, elevate only for service ops
   tauri.pubkey                    Committed updater public key (private key is gitignored)
 docs/
+  ROADMAP.md                      What is solid, what comes next, and the non-goals
   UPDATER.md                      Key management, release artifacts, verification
   signpath-foundation-application.md  Text used to apply for free code signing
-.github/                          CI / CodeQL workflows, issue + PR templates, dependabot
+  releases/                       The download page (published to GitHub Pages)
+scripts/
+  lint-i18n.mjs                   Guards the zh-CN / en-US dictionaries
+  snapshot-releases.mjs           Refreshes the download page's fallback data
+screenshots/                      README images; see the spec in that directory
+.github/                          CI / CodeQL / Pages workflows, issue + PR templates, dependabot
 CONTRIBUTING.md                   Build setup, house rules, good first issues
 SECURITY.md                       Privilege boundary and vulnerability reporting
 CHANGELOG.md                      Notable changes, Keep a Changelog format

@@ -19,6 +19,8 @@
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "vue-tsc --noEmit",
+    "lint:i18n": "node scripts/lint-i18n.mjs",
+    "snapshot:releases": "node scripts/snapshot-releases.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

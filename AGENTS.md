@@ -48,7 +48,20 @@ cpum/
 │       │                                #   journal, runtime, tests — split by responsibility)
 │       └── cpum-service/                # Windows service binary (LocalSystem daemon)
 │           └── src/main.rs              # Rule daemon + ProBalance tick + one-shot helper
-├── .github/                            # CI / CodeQL workflows, issue + PR templates, dependabot
+├── scripts/                            # Dependency-free Node scripts run by CI / by hand
+│   ├── lint-i18n.mjs                   # i18n guard: locale parity, t() keys, stray CJK
+│   ├── snapshot-releases.mjs           # Refreshes the download page's fallback data
+│   └── lib/source.mjs                  # Comment stripper + tokenizer shared by the two
+├── docs/
+│   ├── ROADMAP.md                      # What is next, and the non-goals with reasons
+│   ├── UPDATER.md                      # Updater keys, artifacts, verification
+│   ├── releases/                       # The GitHub Pages site root (download page)
+│   │   ├── index.html                  # Reads the releases API, never builds filenames
+│   │   ├── assets/releases.js          # Fetch / cache / classify — the only copy
+│   │   └── data/releases.json          # Committed snapshot for when the API is down
+│   └── signpath-foundation-application.md
+├── screenshots/                        # README images; the spec lives in that directory
+├── .github/                            # CI / CodeQL / Pages workflows, issue + PR templates, dependabot
 ├── .gitleaks.toml                      # Secret-scan allowlist (public keys that look like keys)
 ├── CHANGELOG.md                        # Keep a Changelog; add to [Unreleased] with every PR
 ├── CONTRIBUTING.md                     # Build setup, house rules, good first issues
@@ -68,6 +81,8 @@ cpum/
 | `cd src-tauri && cargo clippy --workspace --all-targets -- -D warnings` | Lint gate; CI keeps warnings at zero |
 | `cd src-tauri && cargo fmt --all -- --check` | Report rustfmt drift only |
 | `npx vue-tsc --noEmit` | Type-check frontend TypeScript/Vue files |
+| `npm run lint:i18n` | i18n guard: `zh-CN` / `en-US` key sets must match, every static `t('...')` key must resolve, and no CJK character may appear outside `src/i18n.ts`. Runs in CI; no dependencies |
+| `npm run snapshot:releases` | Refresh `docs/releases/data/releases.json`, the download page's fallback when the releases API is unreachable. Run it after publishing a release |
 | `npm run build` | `vue-tsc --noEmit` + `vite build` |
 | `npx tauri dev` | Run the full Tauri app in development mode |
 | `.\build.bat` | Full local release build: icons, frontend, service binary, NSIS installer, `SHA256SUMS.txt` |
@@ -97,7 +112,8 @@ The UI is bilingual (**zh-CN / en-US**), managed by `src/i18n.ts`:
 - **Code comments must be in English**: this is an open-source project, so all non-user-facing comments (Rust `//` / `///` / `//!`, TypeScript `//` / `/* */`, Vue templates, Markdown, and user-visible Rust strings such as `eprintln!` / `format!` / `panic!` macros) MUST be in English. Only the zh-CN translation values inside `src/i18n.ts` and the Chinese-localized `README.zh-CN.md` stay in Chinese by design.
 - **Technical terms stay as-is in both locales**: `PID`, `LP`, `CCD`, `Mask`, `0xFF` etc.
 - **Known limitation**: success messages returned by the Rust backend (e.g. service install/start) bypass the frontend dictionary; translating them requires backend-side changes.
-- **Verification**: after i18n changes, run `npx vue-tsc --noEmit` and grep the repo tree to confirm no Chinese string literals remain outside `i18n.ts` (zh-CN values) and `README.zh-CN.md` (the intentionally Chinese readme).
+- **Verification**: run `npm run lint:i18n` (also a CI job, and the only i18n gate). It parses the `messages` object in `src/i18n.ts` — rather than regex-matching lines, because translation values contain `{}` placeholders — and fails when the two locales disagree, when a static `t('...')` key has no entry, or when a CJK character appears anywhere outside `src/i18n.ts`. `npx vue-tsc --noEmit` does not catch any of those; the hand-written grep it replaces was easy to forget.
+- **Both READMEs must move together**: a section, an install instruction or a link added to `README.md` and not to `README.zh-CN.md` (or vice versa) is a defect, not a stylistic choice.
 
 ## Architecture Notes
 

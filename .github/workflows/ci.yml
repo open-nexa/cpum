@@ -84,7 +84,7 @@ jobs:
         run: cargo test --locked -p cpum-core
 
   frontend:
-    name: frontend (typecheck + build)
+    name: frontend (i18n + typecheck + build)
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -99,6 +99,15 @@ jobs:
       # package.json disagree.
       - name: npm ci
         run: npm ci
+
+      # "Every user-visible string exists in both locales" is a house rule that
+      # is easy to state and easy to break, so it is checked rather than trusted.
+      # scripts/lint-i18n.mjs compares the zh-CN / en-US key sets, verifies that
+      # every static t('...') key resolves, and fails on any CJK character
+      # outside src/i18n.ts (a hardcoded string or a Chinese comment).
+      # Needs no dependencies beyond node itself.
+      - name: i18n guard
+        run: npm run lint:i18n
 
       # vue-tsc --noEmit && vite build
       - name: typecheck + build

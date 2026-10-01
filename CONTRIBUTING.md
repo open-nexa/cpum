@@ -59,6 +59,7 @@ cargo fmt --all -- --check          # report drift only
 cargo clippy --workspace --all-targets
 cargo test -p cpum-core             # all Rust tests live in cpum-core
 cd ..
+npm run lint:i18n                   # zh-CN / en-US parity, t() keys, no stray CJK
 npx vue-tsc --noEmit
 ```
 
@@ -99,9 +100,12 @@ primary one is missing, but `probalance.json` and the ProBalance journal in the
 same directory are left behind. Small, and it is the same shape as the code
 that is already there.
 
-**2. A short demo.** There is no end-to-end walkthrough: one recording of
-installing the service and watching a rule get reapplied after a restart would
-do more for the project than most of the items here. No Rust required.
+**2. Screenshots, then a short demo.** Neither README has a single image, which
+for a desktop application is worse than any missing feature. `screenshots/README.md`
+lists the four shots needed and how to capture them. After that: no end-to-end
+walkthrough exists either — one recording of installing the service and watching a
+rule get reapplied after a restart would do more for the project than most of the
+items here. No Rust required for either.
 
 **3. Localise the backend success strings.** Messages returned by the Rust
 backend (service install / start / stop) bypass `src/i18n.ts`, so they are
@@ -110,6 +114,16 @@ always English. Moving them behind a locale-aware error code fixes that.
 **4. ARM64 correctness pass.** The release matrix builds an ARM64 installer, but
 topology detection (CCD grouping, hybrid-core classification) has only been
 exercised on x64. *Medium.*
+
+**5. Make `latest.json` point at a file that exists.** The updater manifest for
+v0.1.0 references `CPU Manager_0.1.0_x64-setup.exe` with a space, while GitHub
+published the asset as `CPU.Manager_0.1.0_x64-setup.exe`. Confirm whether GitHub
+resolves that URL; if it does not, the release workflow has to publish the
+manifest with the name the asset actually has. *Small, but it needs a real
+release to test against.*
+
+The longer-term plan, including what is deliberately **not** planned and why, is
+in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Labels
 
