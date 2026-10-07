@@ -62,8 +62,22 @@ const tableHeight = ref(480);
 const logicalProcessorUsage = ref<LogicalProcessorUsage[]>([]);
 let coreUsageTimer: ReturnType<typeof setInterval> | null = null;
 
+/** Ref onto the ProBalance panel, so its refresh can ride on this component's
+ *  ticker instead of a second, unaligned interval (audit item O7). */
+const pbPanelRef = ref<InstanceType<typeof ProBalancePanel> | null>(null);
+let coreUsageTicks = 0;
+
 async function refreshLogicalProcessorUsage() {
   try { logicalProcessorUsage.value = await getLogicalProcessorUsage(); } catch { /* unsupported or transient failure */ }
+}
+
+/** One tick of the single front-end ticker: per-core usage every second, and
+ *  the ProBalance panel every second tick (2 s) while it is open. */
+function onCoreUsageTick() {
+  void refreshLogicalProcessorUsage();
+  if (pbPanelOpen.value && ++coreUsageTicks % 2 === 0) {
+    pbPanelRef.value?.poll();
+  }
 }
 
 // CPU core usage card: keep each visible row's core count as even as
@@ -390,7 +404,7 @@ onMounted(() => {
   metricsStream.register();
   metricsStream.start();
   refreshLogicalProcessorUsage();
-  coreUsageTimer = setInterval(refreshLogicalProcessorUsage, 1000);
+  coreUsageTimer = setInterval(onCoreUsageTick, 1000);
 
   // Bootstrap topology + processes in parallel
   initTopology();
@@ -750,7 +764,7 @@ async function doStopService() {
     <AffinityRuleManager v-model="ruleManagerOpen" :topology="topology" @applied="onRulesApplied" />
 
     <!-- ProBalance Dynamic Optimization Panel -->
-    <ProBalancePanel v-model="pbPanelOpen" />
+    <ProBalancePanel ref="pbPanelRef" v-model="pbPanelOpen" />
 
     <!-- Service Management Dialog -->
     <v-dialog v-model="serviceDialogOpen" max-width="520" scroll-strategy="block">

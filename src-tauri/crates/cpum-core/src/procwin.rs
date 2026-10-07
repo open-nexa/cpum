@@ -924,9 +924,102 @@ pub fn set_affinity_by_group_masks(
     }
 }
 
+// =========================================================================
+// Idempotency checks (let the rule engine skip redundant writes)
+// =========================================================================
+
+/// Compare two per-group mask lists, treating a missing group as 0.
+///
+/// Pure, so the engine's "is this process already in the desired state?"
+/// decision is unit-testable without a live process.
+pub fn group_masks_equal(current: &[u64], desired: &[u64]) -> bool {
+    let len = current.len().max(desired.len());
+    (0..len).all(|i| current.get(i).copied().unwrap_or(0) == desired.get(i).copied().unwrap_or(0))
+}
+
+/// Whether `pid` already carries the affinity described by `masks`.
+///
+/// The rule engine uses this to turn its periodic write into a no-op: every
+/// affinity write makes the kernel re-evaluate thread placement for every
+/// thread of that process, which can force migrations and cost cache locality
+/// - exactly what a user pins a process to avoid (audit item O4).
+///
+/// **Any read failure returns `false`.** A process we cannot observe is written,
+/// never skipped: the worst failure mode of this optimisation must be "slower",
+/// never "the rule silently stopped being enforced".
+pub fn affinity_matches(pid: u32, masks: &[u64], mode: crate::rule::RuleMode) -> bool {
+    if validate_group_masks(masks).is_err() {
+        return false;
+    }
+    // Soft mode only exists where CPU Sets do; elsewhere
+    // `set_affinity_by_group_masks` falls back to the hard mask, so that is
+    // what has to be compared.
+    if matches!(mode, crate::rule::RuleMode::Soft) && cpu_sets_available() {
+        return soft_affinity_matches(pid, masks);
+    }
+    if masks.len() <= 1 {
+        let want = masks.first().copied().unwrap_or(0);
+        match get_process_affinity(pid) {
+            Ok((Some(current), _)) => current == want,
+            _ => false,
+        }
+    } else {
+        match get_process_group_masks(pid) {
+            Some(current) => group_masks_equal(&current, masks),
+            None => false,
+        }
+    }
+}
+
+/// Soft mode sets two things: the default CPU Sets *and* the hard mask back to
+/// the system mask. Both must already hold before the write can be skipped.
+fn soft_affinity_matches(pid: u32, masks: &[u64]) -> bool {
+    let Ok(mut desired) = cpu_set_ids_for_group_masks(masks) else {
+        return false;
+    };
+    let Ok(locations) = get_process_default_cpu_set_locations(pid) else {
+        return false;
+    };
+    let mut current: Vec<u32> = locations
+        .iter()
+        .filter_map(|(group, lp_index)| {
+            CPU_SETS
+                .iter()
+                .find(|e| e.group == *group && e.lp_index == *lp_index)
+                .map(|e| e.id)
+        })
+        .collect();
+    if current.len() != locations.len() {
+        // A reported CPU Set we have no entry for - do not guess.
+        return false;
+    }
+    desired.sort_unstable();
+    current.sort_unstable();
+    if desired != current {
+        return false;
+    }
+    // The hard mask must be unconstrained, otherwise the soft rule has work to
+    // do even when the CPU Sets are right.
+    match get_process_affinity(pid) {
+        Ok((Some(process_mask), Some(system_mask))) => process_mask == system_mask,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod group_mask_tests {
     use super::validate_group_masks_for_counts;
+
+    #[test]
+    fn group_masks_equal_ignores_absent_and_zero_filled_groups() {
+        // A group the OS reports but the rule omits means "no LPs there", which
+        // is 0 - so the two spellings must compare equal.
+        assert!(super::group_masks_equal(&[0xF, 0], &[0xF]));
+        assert!(super::group_masks_equal(&[0xF], &[0xF, 0]));
+        assert!(super::group_masks_equal(&[], &[]));
+        assert!(!super::group_masks_equal(&[0xF, 1], &[0xF]));
+        assert!(!super::group_masks_equal(&[0xF], &[0x7]));
+    }
 
     #[test]
     fn accepts_masks_within_each_group_range() {

@@ -105,7 +105,9 @@ pub fn collect_metrics_tick() -> Result<MetricsTick, String> {
     let (prev_time, prev_map) = prev_opt.clone().unwrap_or_else(|| (now, HashMap::new()));
     let dt_ms = now.saturating_duration_since(prev_time).as_millis();
 
-    let (processes_base, snap_map) = enumerate_with_snapshots()?;
+    // Per-second stream: the priority classes may come from the 2 s cache
+    // (audit item O3); everything else is read fresh every round.
+    let (processes_base, snap_map) = enumerate_with_snapshots(false)?;
 
     // The alive pid set for this round (used to detect removed processes).
     let alive_set: std::collections::HashSet<u32> = snap_map.keys().copied().collect();

@@ -20,6 +20,13 @@ use windows::Win32::System::Threading::{
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct ProcessBasicInfo {
     pub working_set_bytes: u64,
+    /// Process creation time in 100 ns FILETIME units.
+    ///
+    /// `GetProcessTimes` fills it for free alongside the CPU counters, and it
+    /// is the only cheap, stable identity token for a PID: the exe-path cache
+    /// (audit item O2) keys on `(pid, create_time)` so a recycled PID can
+    /// never hand out another process's path.
+    pub create_time: Option<u64>,
     pub cpu_total_ticks: Option<u64>,
     pub disk_read_bytes: Option<u64>,
     pub disk_write_bytes: Option<u64>,
@@ -133,7 +140,8 @@ pub(super) fn read_metrics_for_handle(handle: HANDLE) -> ProcessBasicInfo {
     let mut exit = windows::Win32::Foundation::FILETIME::default();
     let mut kernel = windows::Win32::Foundation::FILETIME::default();
     let mut user = windows::Win32::Foundation::FILETIME::default();
-    let _ = unsafe { GetProcessTimes(handle, &mut create, &mut exit, &mut kernel, &mut user) };
+    let times_ok =
+        unsafe { GetProcessTimes(handle, &mut create, &mut exit, &mut kernel, &mut user) }.is_ok();
     let mut pmc: PROCESS_MEMORY_COUNTERS_EX = unsafe { std::mem::zeroed() };
     let working_set_bytes = unsafe {
         if K32GetProcessMemoryInfo(
@@ -165,12 +173,21 @@ pub(super) fn read_metrics_for_handle(handle: HANDLE) -> ProcessBasicInfo {
     let kernel_time_100ns = filetime_u64(kernel);
     let user_time_100ns = filetime_u64(user);
     let cpu_total_ticks = Some(kernel_time_100ns + user_time_100ns);
+    // A failed `GetProcessTimes` leaves the FILETIMEs zeroed, which would look
+    // like a valid (1970) creation time and let the exe-path cache serve a
+    // stale entry - so `create_time` is None unless the call succeeded.
+    let create_time = if times_ok {
+        Some(filetime_u64(create))
+    } else {
+        None
+    };
     let disk_read_bytes = io.as_ref().map(|c| c.read_transfer_count);
     let disk_write_bytes = io.as_ref().map(|c| c.write_transfer_count);
     let (net_in_bytes, net_out_bytes) = read_net_counters_for_handle(handle);
 
     ProcessBasicInfo {
         working_set_bytes,
+        create_time,
         cpu_total_ticks,
         disk_read_bytes,
         disk_write_bytes,
@@ -186,14 +203,15 @@ fn filetime_u64(ft: windows::Win32::Foundation::FILETIME) -> u64 {
 /// Read per-process network IO counters via NtQueryInformationProcess.
 /// Win11 24H2+ exposes class 114 (ProcessNetworkIoCounters). Returns
 /// (BytesIn, BytesOut); 0 / (0, 0) when unsupported.
+///
+/// The caller's handle is reused directly (audit item O1). The previous
+/// implementation resolved the PID back out of the handle and opened a second
+/// handle, which cost one extra `OpenProcess` per process per round and failed
+/// more often, because it asked for `PROCESS_QUERY_INFORMATION` instead of
+/// reusing the limited-information handle the sampler had already fallen back
+/// to.
 fn read_net_counters_for_handle(handle: HANDLE) -> (u64, u64) {
-    use windows::Win32::System::Threading::GetProcessId;
-
     use crate::process::net_probe;
 
-    let pid = unsafe { GetProcessId(handle) };
-    if pid == 0 {
-        return (0, 0);
-    }
-    net_probe::read_network_io(pid).unwrap_or((0, 0))
+    net_probe::read_network_io_with_handle(handle).unwrap_or((0, 0))
 }

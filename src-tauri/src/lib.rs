@@ -642,7 +642,11 @@ fn delete_affinity_rule<R: Runtime>(app: tauri::AppHandle<R>, id: String) -> Res
 fn apply_affinity_rules<R: Runtime>(app: tauri::AppHandle<R>) -> Result<u32, String> {
     let rules = load_affinity_rules(app.clone())?;
     let report = cpum_core::engine::apply_rules(&rules)?;
-    let mut applied = report.applied;
+    // Processes that already match their rule are counted too: from the user's
+    // point of view the rule *is* applied to them, and "Rules applied to 0
+    // processes" on the second click would read as a bug. Only `report.changed`
+    // (real writes) produces row-patch events.
+    let mut applied = report.applied + report.skipped;
     let mut handled: HashSet<u32> = HashSet::new();
     for changed in report.changed {
         handled.insert(changed.pid);

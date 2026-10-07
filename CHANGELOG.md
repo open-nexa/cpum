@@ -68,6 +68,32 @@ x64 and ARM64 NSIS installers, the signed updater artifacts, `latest.json` and
 - The updater endpoint now points at `open-nexa/cpum`. Installations of 0.1.1
   and older check `yixinin/cpum`, so they will not see this release; install
   0.2.0 once by hand to pick the new endpoint up.
+- Applying a rule now checks the current state first and skips the write when the
+  process is already pinned / prioritised the way the rule wants. The service used
+  to rewrite affinity and the three priority classes for every matching process
+  every five seconds, and each of those writes makes the kernel re-evaluate thread
+  placement for every thread of the process. A process whose state cannot be read
+  is still written every time, so the change can only ever cost less, never stop a
+  rule from being enforced. `cpum_service --apply-once --force` writes
+  unconditionally when the skip logic needs to be ruled out.
+- The per-second metrics round reuses the process handle it already holds to read
+  the network counters, instead of resolving the PID back out of the handle and
+  opening a second one. That was one extra `OpenProcess` per process per second,
+  and it asked for `PROCESS_QUERY_INFORMATION`, which is denied more often than the
+  limited-information handle the sampler falls back to - so the network column
+  should now be populated for more processes, not just read faster.
+- The per-process walk is single-threaded by default. At a few hundred processes
+  the work is ~26 us of syscalls each, so the thread spawn costs more than it
+  saves (measured: 11.3 ms with 8 threads vs 10.1 ms single-threaded); the
+  parallel path now only engages above 600 processes.
+- Two slow-changing fields are cached instead of re-read every round: the resolved
+  exe path (keyed by PID *and* process creation time, so a recycled PID cannot be
+  handed another process's path) and the three priority classes (re-read every
+  2 s). A full refresh - the first frame, or a manual reload - still reads the
+  priority classes for every process, so the values it shows are exact.
+- The ProBalance panel no longer runs its own 2 s timer; `App.vue` calls it from
+  the 1 s ticker it already runs, so the per-core usage poll and the panel refresh
+  stop landing in the same frame.
 - npm is the single supported package manager. `yarn.lock` is gone; use
   `npm ci` (CI) or `npm install` locally.
 - The whole Rust tree is formatted with rustfmt, and CI now blocks on

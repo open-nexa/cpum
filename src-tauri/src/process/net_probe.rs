@@ -12,6 +12,7 @@
 
 use std::mem::size_of;
 
+use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::Threading::PROCESS_QUERY_INFORMATION;
 
 use cpum_core::procwin::nt_query_information_process;
@@ -21,8 +22,16 @@ use super::sampling::{
     close_handle, open_handle, ProcessNetworkCounters, PROCESS_NETWORK_IO_COUNTERS_CLASS,
 };
 
-pub fn read_network_io(pid: u32) -> Option<(u64, u64)> {
-    let handle = open_handle(pid, PROCESS_QUERY_INFORMATION)?;
+/// Read the per-process network counters through an **already-open handle**.
+///
+/// This is the path the metrics sampler must use: it already owns a handle,
+/// so resolving the PID with `GetProcessId` and opening a second one costs an
+/// extra `OpenProcess` per process per round. The second open also asked for
+/// `PROCESS_QUERY_INFORMATION`, which is denied more often than the
+/// limited-information handle the sampler falls back to - so reusing the
+/// handle removes both the cost (audit item O1, ~0.9 ms per round at 388
+/// processes) and part of the failure rate.
+pub fn read_network_io_with_handle(handle: HANDLE) -> Option<(u64, u64)> {
     let nt = nt_query_information_process()?;
     let mut counters: ProcessNetworkCounters = unsafe { std::mem::zeroed() };
     let mut returned = 0u32;
@@ -35,7 +44,6 @@ pub fn read_network_io(pid: u32) -> Option<(u64, u64)> {
             &mut returned,
         )
     };
-    close_handle(handle);
     (status == 0 && returned as usize >= size_of::<ProcessNetworkCounters>())
         .then_some((counters.bytes_in, counters.bytes_out))
 }
