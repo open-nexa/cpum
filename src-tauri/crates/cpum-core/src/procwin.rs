@@ -368,16 +368,25 @@ pub fn aggregate_group_affinity_by_pid() -> Result<HashMap<u32, Vec<u64>>, Strin
     }
 }
 
-/// Read per-group affinity masks of a single process (None when no thread
-/// can be opened).
+/// Read per-group affinity masks of a single process.
+///
+/// Returns `None` unless **every** thread could be observed. A partial read is
+/// treated as no read at all: `affinity_matches` feeds the idempotent rule
+/// application (audit item O4), and a mask built from half of a process's
+/// threads can equal the desired masks while the unobserved threads are
+/// somewhere else entirely - which would suppress a write that is still
+/// needed. Skipping on incomplete information is the only failure mode O4
+/// must not have, so the caller writes instead.
 pub fn get_process_group_masks(pid: u32) -> Option<Vec<u64>> {
     let group_count = active_group_count() as usize;
     let tids = enumerate_process_threads(pid).ok()?;
+    let thread_count = tids.len();
     let mut masks = vec![0u64; group_count];
-    let mut any = false;
+    let mut complete = true;
     for tid in tids {
         unsafe {
             let Ok(h) = OpenThread(THREAD_QUERY_INFORMATION, false, tid) else {
+                complete = false;
                 continue;
             };
             let mut ga = GROUP_AFFINITY::default();
@@ -385,13 +394,20 @@ pub fn get_process_group_masks(pid: u32) -> Option<Vec<u64>> {
                 let g = ga.Group as usize;
                 if g < group_count {
                     masks[g] |= ga.Mask as u64;
-                    any = true;
+                } else {
+                    // A group we do not know about: its threads are not
+                    // represented in `masks`, so the read is incomplete.
+                    complete = false;
                 }
+            } else {
+                complete = false;
             }
             let _ = CloseHandle(h);
         }
     }
-    if any {
+    // A process with no threads left is not "already correct" either - there
+    // is nothing to compare, so let the caller write.
+    if complete && thread_count > 0 {
         Some(masks)
     } else {
         None
@@ -924,9 +940,102 @@ pub fn set_affinity_by_group_masks(
     }
 }
 
+// =========================================================================
+// Idempotency checks (let the rule engine skip redundant writes)
+// =========================================================================
+
+/// Compare two per-group mask lists, treating a missing group as 0.
+///
+/// Pure, so the engine's "is this process already in the desired state?"
+/// decision is unit-testable without a live process.
+pub fn group_masks_equal(current: &[u64], desired: &[u64]) -> bool {
+    let len = current.len().max(desired.len());
+    (0..len).all(|i| current.get(i).copied().unwrap_or(0) == desired.get(i).copied().unwrap_or(0))
+}
+
+/// Whether `pid` already carries the affinity described by `masks`.
+///
+/// The rule engine uses this to turn its periodic write into a no-op: every
+/// affinity write makes the kernel re-evaluate thread placement for every
+/// thread of that process, which can force migrations and cost cache locality
+/// - exactly what a user pins a process to avoid (audit item O4).
+///
+/// **Any read failure returns `false`.** A process we cannot observe is written,
+/// never skipped: the worst failure mode of this optimisation must be "slower",
+/// never "the rule silently stopped being enforced".
+pub fn affinity_matches(pid: u32, masks: &[u64], mode: crate::rule::RuleMode) -> bool {
+    if validate_group_masks(masks).is_err() {
+        return false;
+    }
+    // Soft mode only exists where CPU Sets do; elsewhere
+    // `set_affinity_by_group_masks` falls back to the hard mask, so that is
+    // what has to be compared.
+    if matches!(mode, crate::rule::RuleMode::Soft) && cpu_sets_available() {
+        return soft_affinity_matches(pid, masks);
+    }
+    if masks.len() <= 1 {
+        let want = masks.first().copied().unwrap_or(0);
+        match get_process_affinity(pid) {
+            Ok((Some(current), _)) => current == want,
+            _ => false,
+        }
+    } else {
+        match get_process_group_masks(pid) {
+            Some(current) => group_masks_equal(&current, masks),
+            None => false,
+        }
+    }
+}
+
+/// Soft mode sets two things: the default CPU Sets *and* the hard mask back to
+/// the system mask. Both must already hold before the write can be skipped.
+fn soft_affinity_matches(pid: u32, masks: &[u64]) -> bool {
+    let Ok(mut desired) = cpu_set_ids_for_group_masks(masks) else {
+        return false;
+    };
+    let Ok(locations) = get_process_default_cpu_set_locations(pid) else {
+        return false;
+    };
+    let mut current: Vec<u32> = locations
+        .iter()
+        .filter_map(|(group, lp_index)| {
+            CPU_SETS
+                .iter()
+                .find(|e| e.group == *group && e.lp_index == *lp_index)
+                .map(|e| e.id)
+        })
+        .collect();
+    if current.len() != locations.len() {
+        // A reported CPU Set we have no entry for - do not guess.
+        return false;
+    }
+    desired.sort_unstable();
+    current.sort_unstable();
+    if desired != current {
+        return false;
+    }
+    // The hard mask must be unconstrained, otherwise the soft rule has work to
+    // do even when the CPU Sets are right.
+    match get_process_affinity(pid) {
+        Ok((Some(process_mask), Some(system_mask))) => process_mask == system_mask,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod group_mask_tests {
     use super::validate_group_masks_for_counts;
+
+    #[test]
+    fn group_masks_equal_ignores_absent_and_zero_filled_groups() {
+        // A group the OS reports but the rule omits means "no LPs there", which
+        // is 0 - so the two spellings must compare equal.
+        assert!(super::group_masks_equal(&[0xF, 0], &[0xF]));
+        assert!(super::group_masks_equal(&[0xF], &[0xF, 0]));
+        assert!(super::group_masks_equal(&[], &[]));
+        assert!(!super::group_masks_equal(&[0xF, 1], &[0xF]));
+        assert!(!super::group_masks_equal(&[0xF], &[0x7]));
+    }
 
     #[test]
     fn accepts_masks_within_each_group_range() {

@@ -26,8 +26,10 @@ const errorMsg = ref<string | null>(null);
  *  immediately write the just-loaded data back to the backend). */
 const configLoaded = ref(false);
 
-/** Status polling handle (refreshes status + log every 2s while the panel is open) */
-let pollTimer: ReturnType<typeof setInterval> | null = null;
+// Polling is driven from outside: `App.vue` owns the single 1 s ticker and calls
+// the exposed `poll()` every second tick. This panel used to own a 2 s interval,
+// which drifted against the core-usage poll and put two IPC bursts in the same
+// frame (audit item O7).
 /** If the status file is older than this many seconds, the service is considered offline */
 const STATUS_FRESH_SECS = 5;
 /** Debounce window for auto-save: collapse rapid keystrokes / toggle clicks into
@@ -262,20 +264,20 @@ function setNumericField(key: NumericConfigKey, value: number | string) {
   }
 }
 
+/** Refresh immediately when the panel opens; the periodic refresh is driven by
+ *  the shared ticker in `App.vue` through the exposed `poll()`. */
 function startPolling() {
-  stopPolling();
   poll();
-  pollTimer = setInterval(poll, 2000);
 }
 
 function stopPolling() {
-  if (pollTimer !== null) {
-    clearInterval(pollTimer);
-    pollTimer = null;
-  }
   // Flush any pending auto-save so the user's last edit isn't lost on close.
   flushPendingSave();
 }
+
+// Exposed so `App.vue` can fold this panel's 2 s refresh into the single 1 s
+// ticker it already runs (audit item O7).
+defineExpose({ poll });
 
 watch(
   () => props.modelValue,

@@ -1,5 +1,5 @@
-//! Process enumeration: ToolHelp fast scan + parallel handle walk
-//! (affinity / three priority classes / metrics snapshots).
+//! Process enumeration: ToolHelp fast scan + handle walk (affinity / three
+//! priority classes / metrics snapshots).
 //!
 //! Three paths, increasing cost:
 //!  - [`list_processes_light`]: pure fast scan, <20ms, populates the first
@@ -8,12 +8,20 @@
 //!    rates), backfills the first frame in the background.
 //!  - [`enumerate_with_snapshots`]: intermediate layer shared with the
 //!    metrics stream (does not assemble Vec<ProcessInfo>).
+//!
+//! The per-process walk is single-threaded by default: the work is ~26 us of
+//! syscalls per process, so at a few hundred processes spawning threads costs
+//! more than it saves (audit item O5 measured 11.3 ms with 8 threads vs 10.1 ms
+//! single-threaded). Slow-changing fields are cached instead - see
+//! [`EXE_PATH_CACHE`] (O2) and [`PRIORITY_CACHE`] (O3).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
-use std::time::Instant;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{CloseHandle, WIN32_ERROR};
+use once_cell::sync::Lazy;
+use windows::Win32::Foundation::{CloseHandle, HANDLE, WIN32_ERROR};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
@@ -136,9 +144,179 @@ pub(super) fn list_basic_entries() -> Result<Vec<RawEntry>, String> {
     Ok(raw)
 }
 
-// ---------- Parallel full enumeration ----------
+// ---------- Full enumeration ----------
 
-pub(super) fn enumerate_with_snapshots() -> Result<
+/// Process count above which the per-process walk is split across threads.
+///
+/// The per-process work is ~26 us of syscalls, so thread spawn plus
+/// synchronisation only pays off on very large process counts (audit item O5).
+const PARALLEL_THRESHOLD: usize = 600;
+
+/// How often the three priority classes are re-read from the OS (audit item
+/// O3). They change rarely - a rule, ProBalance or the user's own edit - and
+/// the metrics diff already surfaces changes, so a 2 s cadence keeps the
+/// column fresh while removing ~1.9 ms from every one-second round.
+const PRIORITY_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Resolved exe paths, keyed by PID and guarded by the process creation time.
+///
+/// The path is immutable for the lifetime of a process, but a PID *can* be
+/// recycled, so the entry is only used when the creation time still matches
+/// (audit item O2). Entries whose process is gone are pruned every round.
+static EXE_PATH_CACHE: Lazy<Mutex<HashMap<u32, (u64, String)>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Last-read priority classes per PID, plus the time of the last full refresh
+/// wave (audit item O3).
+static PRIORITY_CACHE: Lazy<Mutex<PriorityCache>> = Lazy::new(|| {
+    Mutex::new(PriorityCache {
+        values: HashMap::new(),
+        last_refresh: None,
+    })
+});
+
+struct PriorityCache {
+    values: HashMap<u32, ProcessPriorities>,
+    /// `None` = never refreshed, so the first round always reads.
+    last_refresh: Option<Instant>,
+}
+
+/// Whether this round must re-read the priority classes of every process.
+///
+/// `force` is used by the full-refresh path, where the caller needs exact
+/// values rather than "at most 2 s old".
+fn priority_refresh_due(force: bool) -> bool {
+    if force {
+        return true;
+    }
+    match PRIORITY_CACHE.lock() {
+        Ok(cache) => match cache.last_refresh {
+            None => true,
+            Some(at) => at.elapsed() >= PRIORITY_REFRESH_INTERVAL,
+        },
+        // A poisoned mutex means a previous sampler panicked; fall back to
+        // reading everything rather than serving possibly-stale priorities.
+        Err(_) => true,
+    }
+}
+
+fn priority_cache_read(pid: u32, handle: HANDLE, refresh_due: bool) -> ProcessPriorities {
+    // A process we have never seen has no cached value, so it is read on the
+    // first round regardless of the refresh cadence - a new process must show
+    // correct priorities immediately.
+    if !refresh_due {
+        if let Ok(cache) = PRIORITY_CACHE.lock() {
+            if let Some(p) = cache.values.get(&pid).copied() {
+                return p;
+            }
+        }
+    }
+    let priorities = read_priorities_with_handle(handle);
+    if let Ok(mut cache) = PRIORITY_CACHE.lock() {
+        cache.values.insert(pid, priorities);
+    }
+    priorities
+}
+
+/// Resolve the exe path, reusing the cached value when the process is still
+/// the same process (`create_time` unchanged).
+fn exe_path_cached(pid: u32, create_time: Option<u64>, handle: HANDLE) -> Option<String> {
+    // Without a creation time there is no way to tell a recycled PID from the
+    // original one, so neither read from nor write to the cache.
+    let Some(create_time) = create_time else {
+        return query_image_path_from_handle(handle);
+    };
+    if let Ok(cache) = EXE_PATH_CACHE.lock() {
+        if let Some((cached_time, path)) = cache.get(&pid) {
+            if *cached_time == create_time {
+                return Some(path.clone());
+            }
+        }
+    }
+    let path = query_image_path_from_handle(handle)?;
+    if let Ok(mut cache) = EXE_PATH_CACHE.lock() {
+        cache.insert(pid, (create_time, path.clone()));
+    }
+    Some(path)
+}
+
+/// Drop cache entries for processes that no longer exist. Both caches are
+/// keyed by PID, so without this they would grow for the lifetime of the app
+/// (and a recycled PID could be served a dead process's path).
+fn prune_caches(alive: &HashSet<u32>) {
+    if let Ok(mut cache) = EXE_PATH_CACHE.lock() {
+        cache.retain(|pid, _| alive.contains(pid));
+    }
+    if let Ok(mut cache) = PRIORITY_CACHE.lock() {
+        cache.values.retain(|pid, _| alive.contains(pid));
+    }
+}
+
+/// Open one process and read everything the caller needs from it.
+fn sample_entry(
+    entry: &RawEntry,
+    priority_refresh_due: bool,
+) -> (ProcessBase, super::sampling::ProcessSnapshot) {
+    match open_handle_for_stats(entry.pid) {
+        (None, _) => (
+            ProcessBase {
+                pid: entry.pid,
+                name: entry.name.clone(),
+                exe_path: None,
+                affinity_mask: None,
+                system_affinity_mask: None,
+                group_affinity_masks: None,
+                group_system_affinity_masks: None,
+                parent_pid: entry.parent_pid,
+                access_denied: true,
+                memory_bytes: 0,
+                priorities: ProcessPriorities::default(),
+            },
+            super::sampling::ProcessSnapshot::default(),
+        ),
+        (Some(h), partially_denied) => {
+            let (pm, sm) = read_affinity_with_handle(h);
+            let m = read_metrics_for_handle(h);
+            let priorities = priority_cache_read(entry.pid, h, priority_refresh_due);
+            let exe_path = exe_path_cached(entry.pid, m.create_time, h);
+            close_handle(h);
+            let snap = super::sampling::ProcessSnapshot {
+                cpu_total_ticks: m.cpu_total_ticks.unwrap_or(0),
+                disk_read_bytes: m.disk_read_bytes.unwrap_or(0),
+                disk_write_bytes: m.disk_write_bytes.unwrap_or(0),
+                net_in_bytes: m.net_in_bytes.unwrap_or(0),
+                net_out_bytes: m.net_out_bytes.unwrap_or(0),
+            };
+            let denied = partially_denied || (pm.is_none() && m.cpu_total_ticks.is_none());
+            (
+                ProcessBase {
+                    pid: entry.pid,
+                    name: entry.name.clone(),
+                    exe_path,
+                    affinity_mask: pm.map(mask_to_hex),
+                    system_affinity_mask: sm.map(mask_to_hex),
+                    group_affinity_masks: None,
+                    group_system_affinity_masks: None,
+                    parent_pid: entry.parent_pid,
+                    access_denied: denied,
+                    memory_bytes: m.working_set_bytes,
+                    priorities,
+                },
+                snap,
+            )
+        }
+    }
+}
+
+/// Full enumeration: ToolHelp scan + one handle walk per process.
+///
+/// `force_priority_read` bypasses the 2 s priority cache and re-reads the three
+/// priority classes for every process. The metrics stream passes `false` (it
+/// runs every second); `list_processes` passes `true`, because a user-triggered
+/// full refresh must show exact values.
+pub(super) fn enumerate_with_snapshots(
+    force_priority_read: bool,
+) -> Result<
     (
         Vec<ProcessBase>,
         HashMap<u32, super::sampling::ProcessSnapshot>,
@@ -146,118 +324,68 @@ pub(super) fn enumerate_with_snapshots() -> Result<
     String,
 > {
     let raw = list_basic_entries()?;
+    let refresh_due = priority_refresh_due(force_priority_read);
 
-    // =====================================================================
-    // Phase 2: walk the raw list in parallel, open each process to read
-    //          affinity + metrics (fully decoupled from the ToolHelp
-    //          snapshot).
-    //          ★ Performance-critical ★: 343 processes * 4 syscalls =
-    //          ~1.3k OpenProcess calls. Single-threaded takes ~1-2s; with
-    //          std::thread::scope and per-chunk batching (no rayon dep),
-    //          the syscall-level concurrency cuts this to ~300ms.
-    // =====================================================================
-    use super::sampling::ProcessSnapshot;
+    let mut all_results: Vec<(usize, ProcessBase, super::sampling::ProcessSnapshot)> =
+        Vec::with_capacity(raw.len());
 
-    let nproc = get_number_of_processors() as usize;
-    let n_threads = nproc.clamp(2, 8);
-    let chunk_size = raw.len().div_ceil(n_threads);
-    let chunks: Vec<&[RawEntry]> = raw.chunks(chunk_size).collect();
+    if raw.len() >= PARALLEL_THRESHOLD {
+        // Very large process counts only: the syscall-level concurrency is
+        // worth the thread spawns here (audit item O5).
+        let nproc = get_number_of_processors() as usize;
+        let n_threads = nproc.clamp(2, 8);
+        let chunk_size = raw.len().div_ceil(n_threads);
 
-    let mut all_results: Vec<(usize, ProcessBase, ProcessSnapshot)> = Vec::with_capacity(raw.len());
-
-    std::thread::scope(|s| {
-        let handles: Vec<
-            std::thread::ScopedJoinHandle<'_, Vec<(usize, ProcessBase, ProcessSnapshot)>>,
-        > = chunks
-            .iter()
-            .enumerate()
-            .map(|(chunk_idx, chunk)| {
-                let chunk_start = chunk_idx * chunk_size;
-                s.spawn(move || {
-                    let mut out: Vec<(usize, ProcessBase, ProcessSnapshot)> =
-                        Vec::with_capacity(chunk.len());
-                    for (i, r) in chunk.iter().enumerate() {
-                        let global_idx = chunk_start + i;
-                        let (
-                            affinity_mask,
-                            system_affinity_mask,
-                            access_denied,
-                            exe_path,
-                            mem_bytes,
-                            priorities,
-                            snap,
-                        ) = match open_handle_for_stats(r.pid) {
-                            (None, _) => (
-                                None,
-                                None,
-                                true,
-                                None,
-                                0,
-                                ProcessPriorities::default(),
-                                ProcessSnapshot::default(),
-                            ),
-                            (Some(h), partially_denied) => {
-                                let (pm, sm) = read_affinity_with_handle(h);
-                                let m = read_metrics_for_handle(h);
-                                let prios = read_priorities_with_handle(h);
-                                // Handle already open: resolve the full path here
-                                // (reuse the handle - no extra OpenProcess).
-                                let exe_path = query_image_path_from_handle(h);
-                                close_handle(h);
-                                let snap = ProcessSnapshot {
-                                    cpu_total_ticks: m.cpu_total_ticks.unwrap_or(0),
-                                    disk_read_bytes: m.disk_read_bytes.unwrap_or(0),
-                                    disk_write_bytes: m.disk_write_bytes.unwrap_or(0),
-                                    net_in_bytes: m.net_in_bytes.unwrap_or(0),
-                                    net_out_bytes: m.net_out_bytes.unwrap_or(0),
-                                };
-                                let denied = partially_denied
-                                    || (pm.is_none() && m.cpu_total_ticks.is_none());
-                                (
-                                    pm.map(mask_to_hex),
-                                    sm.map(mask_to_hex),
-                                    denied,
-                                    exe_path,
-                                    m.working_set_bytes,
-                                    prios,
-                                    snap,
-                                )
-                            }
-                        };
-
-                        out.push((
-                            global_idx,
-                            ProcessBase {
-                                pid: r.pid,
-                                name: r.name.clone(),
-                                exe_path,
-                                affinity_mask,
-                                system_affinity_mask,
-                                group_affinity_masks: None,
-                                group_system_affinity_masks: None,
-                                parent_pid: r.parent_pid,
-                                access_denied,
-                                memory_bytes: mem_bytes,
-                                priorities,
-                            },
-                            snap,
-                        ));
-                    }
-                    out
+        std::thread::scope(|s| {
+            let handles: Vec<
+                std::thread::ScopedJoinHandle<
+                    '_,
+                    Vec<(usize, ProcessBase, super::sampling::ProcessSnapshot)>,
+                >,
+            > = raw
+                .chunks(chunk_size)
+                .enumerate()
+                .map(|(chunk_idx, chunk)| {
+                    let chunk_start = chunk_idx * chunk_size;
+                    s.spawn(move || {
+                        chunk
+                            .iter()
+                            .enumerate()
+                            .map(|(i, r)| {
+                                let (base, snap) = sample_entry(r, refresh_due);
+                                (chunk_start + i, base, snap)
+                            })
+                            .collect::<Vec<_>>()
+                    })
                 })
-            })
-            .collect();
+                .collect();
 
-        for h in handles {
-            if let Ok(v) = h.join() {
-                all_results.extend(v);
+            for h in handles {
+                if let Ok(v) = h.join() {
+                    all_results.extend(v);
+                }
             }
-        }
-    });
+        });
 
-    // Restore the original order (parallel chunk processing may reorder
-    // entries).
-    all_results.sort_by_key(|(i, _, _)| *i);
+        // Restore the original order (parallel chunk processing may reorder
+        // entries).
+        all_results.sort_by_key(|(i, _, _)| *i);
+    } else {
+        for (i, r) in raw.iter().enumerate() {
+            let (base, snap) = sample_entry(r, refresh_due);
+            all_results.push((i, base, snap));
+        }
+    }
+
+    // A refresh wave happened: start the next 2 s window from here. Reading a
+    // handful of newly-appeared processes does not reset the window, otherwise
+    // a machine that constantly spawns processes would never refresh the rest.
+    if refresh_due {
+        if let Ok(mut cache) = PRIORITY_CACHE.lock() {
+            cache.last_refresh = Some(Instant::now());
+        }
+    }
+    prune_caches(&raw.iter().map(|r| r.pid).collect());
 
     let group_masks = if cpum_core::procwin::active_group_count() > 1 {
         cpum_core::procwin::aggregate_group_affinity_by_pid().ok()
@@ -282,7 +410,8 @@ pub(super) fn enumerate_with_snapshots() -> Result<
         None
     };
     let mut bases: Vec<ProcessBase> = Vec::with_capacity(all_results.len());
-    let mut snaps: HashMap<u32, ProcessSnapshot> = HashMap::with_capacity(all_results.len());
+    let mut snaps: HashMap<u32, super::sampling::ProcessSnapshot> =
+        HashMap::with_capacity(all_results.len());
     for (_, mut base, snap) in all_results {
         base.group_affinity_masks = group_masks
             .as_ref()
@@ -347,7 +476,9 @@ pub fn list_processes() -> Result<Vec<ProcessInfo>, String> {
     let dt_ms = now.saturating_duration_since(prev_time).as_millis();
 
     // 2. Enumerate all processes + collect the current snapshot.
-    let (processes_base, snap_map) = enumerate_with_snapshots()?;
+    //    `force_priority_read = true`: a full refresh is either the first frame
+    //    or a user-triggered reload, and must not serve a cached priority.
+    let (processes_base, snap_map) = enumerate_with_snapshots(true)?;
 
     // 3. Whenever the interval is >= threshold, compute rates once. (On the
     // first call prev_map is empty, so all rates remain 0 - this is

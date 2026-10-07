@@ -227,13 +227,18 @@ fn one_shot_set_priority(args: &[String]) -> Result<String, String> {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
 
-    // --apply-once [dir]  test mode: run once and exit. Without an explicit
-    // directory the command line / legacy resolution is used, exactly like the
-    // daemon path.
+    // --apply-once [dir] [--force]  test mode: run once and exit. Without an
+    // explicit directory the command line / legacy resolution is used, exactly
+    // like the daemon path. `--force` writes even when a process already
+    // matches its rule (see `engine::apply_rules_with_options`).
     if args.get(1).map(|s| s.as_str()) == Some("--apply-once") {
         let dir = cpum_core::service_dir::resolve(&[], &args);
-        let report = engine::apply_rules_from_dir(&dir)?;
-        println!("Applied: {} ok, {} failed", report.applied, report.failed);
+        let force = args.iter().any(|a| a == "--force");
+        let report = engine::apply_rules_from_dir_with_options(&dir, force)?;
+        println!(
+            "Applied: {} ok, {} already correct (skipped), {} failed",
+            report.applied, report.skipped, report.failed
+        );
         return Ok(());
     }
 
