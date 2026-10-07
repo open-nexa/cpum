@@ -107,10 +107,14 @@ x64 and ARM64 NSIS installers, the signed updater artifacts, `latest.json` and
   siblings in `docs/`. The audit is not committed - it is a working document
   kept in `.workbuddy/`, because its numbers are re-measured per machine - so
   the reference is now plain text and says where the audit actually lives.
-- The `dependency review` job no longer blocks the build. It needs the
-  Dependency graph enabled in the repository settings, which a pull request
-  cannot do; until a maintainer turns it on, the action fails with "Dependency
-  review is not supported on this repository" regardless of the code.
+- The `dependency review` check no longer fails every pull request. The action
+  reads the repository's dependency graph, which has to be enabled in the
+  repository settings - something a pull request cannot do - and while it is off
+  the action always exits 1 with "Dependency review is not supported on this
+  repository" whatever the code does. That failure is now tolerated until the
+  repository variable `DEPENDENCY_REVIEW_ENABLED` is `true`; set it once the
+  setting is on and the job blocks again. Its severity threshold is `high`, the
+  same as the `npm audit` step in the same workflow.
 
 ### Fixed
 

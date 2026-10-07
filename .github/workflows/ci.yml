@@ -227,14 +227,25 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # This action needs the Dependency graph enabled for the repository
-    # (Settings -> Code security). It cannot be turned on from a pull request,
-    # and while it is off the action exits 1 with "Dependency review is not
-    # supported on this repository" whatever the code does - so the job would
-    # be permanently red and would train everyone to ignore CI. Remove
-    # `continue-on-error` once the setting is on; the job is then meaningful
-    # again and should block.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
+      # This action reads the repository's dependency graph, which has to be
+      # enabled first: Settings -> Code security -> Dependency graph
+      # (https://github.com/open-nexa/cpum/settings/security_analysis). It
+      # cannot be turned on from a pull request, and while it is off the action
+      # always exits 1 with "Dependency review is not supported on this
+      # repository" whatever the code does - so the step's failure is tolerated
+      # until the repository variable DEPENDENCY_REVIEW_ENABLED is `true`. Set
+      # that variable once the setting is on and the job starts blocking again.
+      #
+      # The tolerance has to sit on the *step*. Job-level `continue-on-error`
+      # keeps the workflow run green but the check is still reported as
+      # `failure`, so the pull request stays red.
+      #
+      # `fail-on-severity` matches `npm audit --audit-level=high` in the audit
+      # job: moderate and low advisories deep in the build chain are left to
+      # dependabot rather than blocking a contributor.
       - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+        continue-on-error: ${{ vars.DEPENDENCY_REVIEW_ENABLED != 'true' }}
