@@ -56,6 +56,26 @@ x64 and ARM64 NSIS installers, the signed updater artifacts, `latest.json` and
 
 ### Changed
 
+- **Dependencies, in one branch instead of 16 dependabot pull requests.** The
+  frontend moves to Vite 8.3, `@vitejs/plugin-vue` 6.0, `vue-tsc` 3.3, Vuetify
+  4.2, `sass-embedded` 1.105 and TypeScript 6.0; the Rust side to `tauri` 2.12,
+  `tauri-build` 2.7, `tauri-plugin-opener` 2.7, `tauri-plugin-updater` 2.13,
+  `uuid` 1.27 and `windows-service` 0.8. The GitHub Actions group is bumped
+  across all four workflows.
+  - **TypeScript stops at 6.0, not 7.0.** Dependabot proposes 7.0.2, which cannot
+    work here: that release is the native (Go) compiler and its `exports` map has no
+    `./lib/tsc`, while `vue-tsc` — the only way `vue-tsc --noEmit` type-checks the
+    SFCs — resolves `typescript/lib/tsc` and dies with
+    `ERR_PACKAGE_PATH_NOT_EXPORTED`. 6.0.3 is the last release before that rewrite
+    and still ships `lib/tsc`. Revisit when `vue-tsc` supports the native compiler.
+  - The Rust and JavaScript halves of each Tauri plugin are pinned to the same
+    version (`tauri-plugin-opener` 2.7.0, `tauri-plugin-updater` 2.13.1,
+    `@tauri-apps/cli` 2.12.1). `tauri build` refuses to bundle when they differ on
+    major/minor, which it reported for the versions dependabot proposed on the two
+    sides separately.
+  - `actions/dependency-review-action` is pinned to `v5.0.0` instead of the `@v5`
+    dependabot asks for: that repository publishes no floating `v5` tag, so `@v5`
+    does not resolve.
 - The dynamic optimization (ProBalance) panel is now flagged as **Unstable** in
   the UI, both in the toolbar tooltip and as a chip next to the panel title, so
   it is clear the engine is still experimental.
@@ -127,6 +147,19 @@ x64 and ARM64 NSIS installers, the signed updater artifacts, `latest.json` and
 
 ### Fixed
 
+- Four CSS rules in `App.vue` never applied. The non-scoped `<style>` block used
+  `:deep(.v-main)`, `:deep(.v-container)`, `:deep(.v-data-table table)` and
+  `:deep(.v-data-table th/td)`, but Vue only rewrites `:deep()` inside a *scoped*
+  block — elsewhere it is passed through untouched, and a `:deep(...)` selector
+  matches nothing. So the viewport height constraint on the main layout and the
+  fixed-column / ellipsis rules for the process table were all inert, and had been
+  since those rules were written. Vite 6's esbuild minifier dropped them silently;
+  Vite 8 switched to lightningcss, which reports "'deep' is not recognized as a
+  valid pseudo-class" and so made the dead rules visible. The two layout rules are
+  now plain global selectors, which is what the non-scoped block was for. The two
+  table rules are gone rather than rewritten: the virtual-scrolled process table
+  (`ProcessTable.vue`) no longer uses `v-data-table` and implements the fixed column
+  widths and the ellipsis itself.
 - `rustls` updated to 0.23.45 in `src-tauri/Cargo.lock`, closing
   RUSTSEC-2026-0285 (TLS 1.3 handshake messages accepted across encryption
   level boundaries). It reaches the app through `tauri-plugin-updater`.
