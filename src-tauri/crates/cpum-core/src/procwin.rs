@@ -368,16 +368,25 @@ pub fn aggregate_group_affinity_by_pid() -> Result<HashMap<u32, Vec<u64>>, Strin
     }
 }
 
-/// Read per-group affinity masks of a single process (None when no thread
-/// can be opened).
+/// Read per-group affinity masks of a single process.
+///
+/// Returns `None` unless **every** thread could be observed. A partial read is
+/// treated as no read at all: `affinity_matches` feeds the idempotent rule
+/// application (audit item O4), and a mask built from half of a process's
+/// threads can equal the desired masks while the unobserved threads are
+/// somewhere else entirely - which would suppress a write that is still
+/// needed. Skipping on incomplete information is the only failure mode O4
+/// must not have, so the caller writes instead.
 pub fn get_process_group_masks(pid: u32) -> Option<Vec<u64>> {
     let group_count = active_group_count() as usize;
     let tids = enumerate_process_threads(pid).ok()?;
+    let thread_count = tids.len();
     let mut masks = vec![0u64; group_count];
-    let mut any = false;
+    let mut complete = true;
     for tid in tids {
         unsafe {
             let Ok(h) = OpenThread(THREAD_QUERY_INFORMATION, false, tid) else {
+                complete = false;
                 continue;
             };
             let mut ga = GROUP_AFFINITY::default();
@@ -385,13 +394,20 @@ pub fn get_process_group_masks(pid: u32) -> Option<Vec<u64>> {
                 let g = ga.Group as usize;
                 if g < group_count {
                     masks[g] |= ga.Mask as u64;
-                    any = true;
+                } else {
+                    // A group we do not know about: its threads are not
+                    // represented in `masks`, so the read is incomplete.
+                    complete = false;
                 }
+            } else {
+                complete = false;
             }
             let _ = CloseHandle(h);
         }
     }
-    if any {
+    // A process with no threads left is not "already correct" either - there
+    // is nothing to compare, so let the caller write.
+    if complete && thread_count > 0 {
         Some(masks)
     } else {
         None

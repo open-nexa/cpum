@@ -98,12 +98,47 @@ x64 and ARM64 NSIS installers, the signed updater artifacts, `latest.json` and
   `npm ci` (CI) or `npm install` locally.
 - The whole Rust tree is formatted with rustfmt, and CI now blocks on
   `cargo fmt --check` and on `cargo clippy -- -D warnings`.
+- `vue` 3.5.41 -> 3.5.43 (`@vue/server-renderer` XSS, GHSA-g2v6-rqmx-r4w6) and
+  `source-map-js` 1.2.1 -> 1.2.2 (event-loop denial of service,
+  GHSA-68fv-2mgg-jv7q). Both are flagged by `npm audit --omit=dev
+  --audit-level=high`, which CI runs; neither path is reachable from this app,
+  but the audit job fails on them.
+- `docs/PERFORMANCE-FIX-PLAN.md` linked to `PERFORMANCE.md` as if the two were
+  siblings in `docs/`. The audit is not committed - it is a working document
+  kept in `.workbuddy/`, because its numbers are re-measured per machine - so
+  the reference is now plain text and says where the audit actually lives.
+- The `dependency review` job no longer blocks the build. It needs the
+  Dependency graph enabled in the repository settings, which a pull request
+  cannot do; until a maintainer turns it on, the action fails with "Dependency
+  review is not supported on this repository" regardless of the code.
 
 ### Fixed
 
 - `rustls` updated to 0.23.45 in `src-tauri/Cargo.lock`, closing
   RUSTSEC-2026-0285 (TLS 1.3 handshake messages accepted across encryption
   level boundaries). It reaches the app through `tauri-plugin-updater`.
+- Applying rules twice could under-report the "applied to N processes" count.
+  The GUI's own pass counted the processes it found already correct, but when
+  the elevated service had to do the work instead, those processes were lost:
+  the service returns them as "skipped", not as writes, so they never appeared
+  in `changed`. `ApplyReport` and the IPC response now carry `skipped_pids`,
+  and both passes feed one de-duplicating set, so a process is counted exactly
+  once no matter which pass saw it.
+- `get_process_group_masks` could report a process as already matching a rule
+  when only some of its threads had been read. A process's affinity is the
+  union over its threads, so a mask built from half of them can equal the
+  rule's masks while the unobserved threads run somewhere else - which made the
+  idempotent apply skip a write that was still needed. The read is now
+  all-or-nothing: if any thread cannot be opened, or a thread reports a
+  processor group this process does not know about, the function returns `None`
+  and the caller writes.
+- The NSIS bundle step in CI never got far enough to fail for a real reason. It
+  passed its updater override as inline JSON escaped with backslashes, which is
+  right for bash but not for PowerShell, the default shell on `windows-latest`:
+  the CLI received literal backslashes and rejected the value. The override is
+  now a file, `src-tauri/tauri.no-updater.conf.json`, so no shell is involved.
+  The release workflow's unsigned branch had the same bug and uses the same
+  file.
 
 ## [0.1.1] — 2026-09-18
 

@@ -647,7 +647,13 @@ fn apply_affinity_rules<R: Runtime>(app: tauri::AppHandle<R>) -> Result<u32, Str
     // processes" on the second click would read as a bug. Only `report.changed`
     // (real writes) produces row-patch events.
     let mut applied = report.applied + report.skipped;
+    // Anything this pass already accounted for is "handled": real writes and
+    // processes that were already correct. The service pass below counts only
+    // what is new, so a process cannot be counted twice.
     let mut handled: HashSet<u32> = HashSet::new();
+    for &pid in &report.skipped_pids {
+        handled.insert(pid);
+    }
     for changed in report.changed {
         handled.insert(changed.pid);
         let _ = app.emit(
@@ -666,6 +672,16 @@ fn apply_affinity_rules<R: Runtime>(app: tauri::AppHandle<R>) -> Result<u32, Str
     // offers elevation for individual PIDs.
     if report.failed > 0 {
         if let Ok(response) = bridge_apply_rules(&app) {
+            // The service skips processes that already match, so they arrive
+            // here only as PIDs - never in `changed`. Count them too, or the
+            // toast under-reports on machines that need the service pass.
+            if let Some(skipped_pids) = response.skipped_pids {
+                for pid in skipped_pids {
+                    if handled.insert(pid) {
+                        applied += 1;
+                    }
+                }
+            }
             if let Some(changed) = response.changed {
                 for entry in changed {
                     if !handled.insert(entry.pid) {

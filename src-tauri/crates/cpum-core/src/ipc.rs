@@ -93,6 +93,13 @@ pub struct Response {
     /// Number of successful (process x rule) applications (`apply_rules`).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub applied: Option<u32>,
+    /// PIDs the service found already in the desired state and therefore did
+    /// not write. They are not in `changed` (their rows already show the
+    /// right values), so the GUI needs them separately - otherwise a process
+    /// the service skipped is missing from the "applied to N processes"
+    /// count. Optional so a newer GUI still talks to an older service.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub skipped_pids: Option<Vec<u32>>,
     /// Per-process result of `apply_rules`, so the GUI can patch its rows.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub changed: Option<Vec<AppliedProcess>>,
@@ -126,10 +133,11 @@ impl Response {
         }
     }
 
-    pub fn applied(applied: u32, changed: Vec<AppliedProcess>) -> Self {
+    pub fn applied(applied: u32, skipped_pids: Vec<u32>, changed: Vec<AppliedProcess>) -> Self {
         Self {
             ok: true,
             applied: Some(applied),
+            skipped_pids: Some(skipped_pids),
             changed: Some(changed),
             ..Default::default()
         }
@@ -371,6 +379,7 @@ fn dispatch(request: Request, rules_dir: &Path) -> Response {
         Request::ApplyRules { .. } => match engine::apply_rules_from_dir(rules_dir) {
             Ok(report) => Response::applied(
                 report.applied,
+                report.skipped_pids,
                 report.changed.iter().map(AppliedProcess::from).collect(),
             ),
             Err(e) => Response::error(e),

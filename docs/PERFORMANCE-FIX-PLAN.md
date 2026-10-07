@@ -1,10 +1,16 @@
 # Performance audit — fix plan
 
-Companion to [`PERFORMANCE.md`](./PERFORMANCE.md). That document measures; this one
-says what to change, in what order, and how to prove each change worked.
+Companion to `PERFORMANCE.md`, the measurement report behind this plan. That
+document measures; this one says what to change, in what order, and how to prove
+each change worked.
 
-Read `PERFORMANCE.md` first. Its verdict is that CPU Manager is *not a measurable
-load* (0.31 % of one core with the GUI closed, ~1.8 % of one core while streaming).
+**`PERFORMANCE.md` is not committed, on purpose.** It is a working document and
+lives outside the tree, in `.workbuddy/` next to this repository; its numbers are
+re-measured per machine, so committing them would let the audit and the code drift
+apart silently. Every mention of it below is therefore plain text and not a link.
+
+Read it first. Its verdict is that CPU Manager is *not a measurable load* (0.31 %
+of one core with the GUI closed, ~1.8 % of one core while streaming).
 So nothing here is urgent, and the ordering below is by risk-adjusted value, not by
 milliseconds — the one item that is worth doing for its own sake is **O4**, because
 it changes what the tool *does to other processes*, not how fast the tool runs.
@@ -281,9 +287,10 @@ Costs scale with process count, so re-measure rather than quoting old numbers.
    as a bug even though it is the honest answer.
 3. **O6: deferred.** It needs virtual scrolling, which replaces the table's row
    rendering rather than tuning it, so it gets its own issue.
-4. **Where the audit lives:** `PERFORMANCE.md` is untracked and only present in the
-   main worktree (`C:/Users/eason/rust/cpum/docs/`). Commit it so the audit, this
-   plan and the numbers they produce cannot drift apart.
+4. **Where the audit lives:** `PERFORMANCE.md` is untracked and only present in
+   the main worktree (`C:/Users/eason/rust/cpum/.workbuddy/`). It stays that way:
+   it is a working document whose numbers are re-measured per machine, and it is
+   referred to by name only — never linked — from anything that is committed.
 
 ## 7. Implementation status
 

@@ -35,6 +35,10 @@ pub struct ApplyReport {
     /// Number of (process x rule) matches that were **already** in the desired
     /// state and were therefore not written (audit item O4).
     pub skipped: u32,
+    /// PIDs counted by `skipped`, so a second apply pass can avoid counting the
+    /// same process twice. One entry per (process x rule) match, so a process
+    /// matched by two rules appears twice - callers deduplicate.
+    pub skipped_pids: Vec<u32>,
     /// Number of failures (a single process failing does not abort the run).
     pub failed: u32,
     /// Per-process details of successful applications that wrote (used by the
@@ -102,6 +106,7 @@ pub fn apply_rules_with_options(
                 Ok(outcome) => {
                     if outcome.skipped {
                         report.skipped += 1;
+                        report.skipped_pids.push(entry.pid);
                     } else {
                         report.applied += 1;
                         report.changed.push(outcome.info);
