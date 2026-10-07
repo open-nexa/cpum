@@ -963,6 +963,16 @@ pub fn group_masks_equal(current: &[u64], desired: &[u64]) -> bool {
 /// **Any read failure returns `false`.** A process we cannot observe is written,
 /// never skipped: the worst failure mode of this optimisation must be "slower",
 /// never "the rule silently stopped being enforced".
+///
+/// **The multi-group branch compares the union of the threads, not each
+/// thread.** `set_process_affinity_group_masks` gives every thread the whole
+/// group mask, so "already correct" could equally be defined per thread. The
+/// union is the looser of the two and it is loose only in the direction that
+/// costs an extra write: `union == masks` requires that *no* thread carries a
+/// bit outside `masks` - one that did would set that bit in the union - which
+/// is exactly what the rule asks for. So threads on `0x1` and `0xE` against a
+/// desired `0xF` correctly count as matching (nothing can leave the allowed
+/// set), while a single thread on `0x10` does not.
 pub fn affinity_matches(pid: u32, masks: &[u64], mode: crate::rule::RuleMode) -> bool {
     if validate_group_masks(masks).is_err() {
         return false;
@@ -1017,7 +1027,13 @@ fn soft_affinity_matches(pid: u32, masks: &[u64]) -> bool {
     // The hard mask must be unconstrained, otherwise the soft rule has work to
     // do even when the CPU Sets are right.
     match get_process_affinity(pid) {
-        Ok((Some(process_mask), Some(system_mask))) => process_mask == system_mask,
+        // A zero on either side is not "unconstrained", it is a read that did
+        // not happen - Windows never reports an affinity mask of 0. Treating
+        // `(0, 0)` as equal would let a soft rule be skipped on the strength of
+        // a failed read, so it counts as unknown and takes the write path.
+        Ok((Some(process_mask), Some(system_mask))) if process_mask != 0 && system_mask != 0 => {
+            process_mask == system_mask
+        }
         _ => false,
     }
 }

@@ -135,11 +135,46 @@ function compareBy(key: string, a: ProcessRow, b: ProcessRow): number {
   }
 }
 
+/**
+ * Order siblings inside a depth-first flattened tree, keeping every node's own
+ * subtree directly beneath it.
+ *
+ * `items` arrives in depth-first order with `_depth` set, so a node's children
+ * are the contiguous block of deeper rows that follows it. Sorting that list
+ * globally would scatter those blocks - a busy child could end up pages away
+ * from its parent while keeping the parent's indentation, so expanding a node
+ * would no longer reveal its children. Sorting each sibling group instead gives
+ * the same ordering intent without breaking the tree.
+ */
+function sortSiblings(
+  rows: ProcessRow[],
+  start: number,
+  end: number,
+  depth: number,
+  cmp: (a: ProcessRow, b: ProcessRow) => number,
+): ProcessRow[] {
+  const groups: { head: ProcessRow; children: ProcessRow[] }[] = [];
+  let i = start;
+  while (i < end) {
+    // Everything after a node that is deeper than it belongs to that node.
+    let j = i + 1;
+    while (j < end && (rows[j]._depth ?? 0) > depth) j += 1;
+    groups.push({ head: rows[i], children: sortSiblings(rows, i + 1, j, depth + 1, cmp) });
+    i = j;
+  }
+  groups.sort((a, b) => cmp(a.head, b.head));
+  const out: ProcessRow[] = [];
+  for (const g of groups) {
+    out.push(g.head, ...g.children);
+  }
+  return out;
+}
+
 const sortedRows = computed<ProcessRow[]>(() => {
   const rows = props.items.slice();
   const key = sortKey.value;
   const dir = sortOrder.value === "asc" ? 1 : -1;
-  rows.sort((a, b) => {
+  const cmp = (a: ProcessRow, b: ProcessRow): number => {
     // Unreadable priorities ("-") always sort last, in both directions.
     if (key === "priority_class" && (a.priority_class === null) !== (b.priority_class === null)) {
       return a.priority_class === null ? 1 : -1;
@@ -147,16 +182,26 @@ const sortedRows = computed<ProcessRow[]>(() => {
     const r = compareBy(key, a, b);
     // Tie-break on pid so the order is stable and independent of direction.
     return r !== 0 ? dir * r : a.pid - b.pid;
-  });
+  };
+  // Tree mode is a hierarchy, not a flat list: sort within each sibling group
+  // so a child never travels away from its parent.
+  if (props.viewMode === "tree") {
+    return sortSiblings(rows, 0, rows.length, 0, cmp);
+  }
+  rows.sort(cmp);
   return rows;
 });
 
 // ---------- Windowing ----------
 const viewportRef = ref<HTMLElement | null>(null);
 const scrollTop = ref(0);
+const scrollLeft = ref(0);
 /** Width stolen by the vertical scrollbar, so the header can be inset to stay
  *  aligned with the body columns. */
 const scrollbarWidth = ref(0);
+/** Sum of the column minimum widths. Below this the columns cannot shrink any
+ *  further, so the body scrolls horizontally and the header follows it. */
+const minTableWidth = computed(() => columns.value.reduce((sum, c) => sum + c.minWidth, 0));
 
 const bodyHeight = computed(() => Math.max(0, props.height - HEADER_HEIGHT));
 const totalHeight = computed(() => sortedRows.value.length * ROW_HEIGHT);
@@ -171,6 +216,7 @@ function onScroll() {
   const el = viewportRef.value;
   if (!el) return;
   scrollTop.value = el.scrollTop;
+  scrollLeft.value = el.scrollLeft;
 }
 
 function measureScrollbar() {
@@ -238,7 +284,11 @@ function childCount(pid: number): number {
     <!-- Header: a sibling of the scroll container, so it stays put without
          position: sticky (which would also need a scroll container ancestor). -->
     <div class="pt-head" role="rowgroup" :style="{ height: `${HEADER_HEIGHT}px`, paddingRight: `${scrollbarWidth}px` }">
-      <div class="pt-head-row" role="row">
+      <!-- The header is a sibling of the scroll container (so it stays put), but
+           it has to travel with the body when the columns overflow sideways,
+           which is what the scrollLeft mirror below is for. -->
+      <div class="pt-head-row" role="row"
+        :style="{ minWidth: `${minTableWidth}px`, transform: `translateX(${-scrollLeft}px)` }">
         <div v-for="col in columns" :key="col.key" role="columnheader" class="pt-cell pt-th"
           :class="[`pt-align-${col.align}`, { 'pt-th--sortable': col.sortable, 'pt-th--sorted': isSorted(col) }]"
           :style="colStyle(col)" :aria-sort="ariaSort(col)" :tabindex="col.sortable ? 0 : undefined"
@@ -252,7 +302,8 @@ function childCount(pid: number): number {
 
     <div ref="viewportRef" class="pt-body" role="rowgroup" :style="{ height: `${bodyHeight}px` }"
       @scroll.passive="onScroll">
-      <div v-if="sortedRows.length" class="pt-canvas" :style="{ height: `${totalHeight}px` }">
+      <div v-if="sortedRows.length" class="pt-canvas"
+        :style="{ height: `${totalHeight}px`, minWidth: `${minTableWidth}px` }">
         <div class="pt-window" :style="{ transform: `translateY(${offsetY}px)` }">
           <div v-for="row in visibleRows" :key="row.pid" class="pt-row" role="row"
             :style="{ height: `${ROW_HEIGHT}px` }" @contextmenu="emit('rowContextmenu', $event, row)"
@@ -349,11 +400,15 @@ function childCount(pid: number): number {
   flex: 0 0 auto;
   background: rgb(var(--v-theme-surface));
   box-shadow: inset 0 -1px 0 rgba(var(--v-border-color), var(--v-border-opacity));
+  /* Clips the header row when the columns are wider than the viewport; the row
+     itself is shifted by `scrollLeft` to stay above the body columns. */
+  overflow: hidden;
 }
 .pt-head-row {
   display: flex;
   align-items: center;
   height: 100%;
+  width: 100%;
 }
 .pt-th {
   font-size: 0.875rem;
@@ -383,8 +438,9 @@ function childCount(pid: number): number {
 .pt-body {
   position: relative;
   flex: 1 1 auto;
-  overflow-y: auto;
-  overflow-x: hidden;
+  /* Both axes: the columns have minimum widths, so a narrow window has to be
+     able to reach the right-hand ones (affinity) instead of clipping them. */
+  overflow: auto;
 }
 .pt-canvas {
   position: relative;
