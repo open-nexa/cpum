@@ -804,11 +804,19 @@ html, body {
   height: 100vh !important;
   overflow: hidden !important;
 }
-:deep(.v-main) {
+/* This block is deliberately not scoped: these rules constrain the viewport
+ * for the whole app, including Vuetify's own layout internals. `:deep()` must
+ * not be used here - Vue only rewrites it inside a scoped block and passes it
+ * through untouched otherwise, so the selectors would never match. Vite 8's
+ * lightningcss is what made that visible ("'deep' is not recognized as a valid
+ * pseudo-class"); under Vite 6's esbuild the rules silently did nothing.
+ * The process list's own column widths and ellipsis live in ProcessTable.vue,
+ * which implements them itself and no longer uses v-data-table. */
+.v-main {
   height: calc(100vh - 64px) !important;
   overflow: hidden !important;
 }
-:deep(.v-container) {
+.v-container {
   height: 100% !important;
   overflow: hidden !important;
 }
