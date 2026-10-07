@@ -94,6 +94,15 @@ x64 and ARM64 NSIS installers, the signed updater artifacts, `latest.json` and
 - The ProBalance panel no longer runs its own 2 s timer; `App.vue` calls it from
   the 1 s ticker it already runs, so the per-core usage poll and the panel refresh
   stop landing in the same frame.
+- The process table is virtual-scrolled. `v-data-table` ran with
+  `items-per-page="-1"`, so every row was live in the DOM and every metrics tick
+  patched all ~390 of them even though only ~20 are on screen; the new
+  `src/components/ProcessTable.vue` renders the viewport plus a small overscan
+  instead. Sorting moved into the component (one column at a time; CPU, memory
+  and priority start descending). Columns, tree indentation, right-click menu,
+  priority colours and the per-CCD affinity swatches are unchanged, and the
+  tree-mode child count is now built once per list change instead of scanning
+  the process list once per row.
 - npm is the single supported package manager. `yarn.lock` is gone; use
   `npm ci` (CI) or `npm install` locally.
 - The whole Rust tree is formatted with rustfmt, and CI now blocks on

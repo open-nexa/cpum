@@ -25,7 +25,7 @@ it changes what the tool *does to other processes*, not how fast the tool runs.
 | **O2** | Cache the resolved exe path per PID | `enumerate.rs` (`EXE_PATH_CACHE`) | ~1.5 ms/round (~8 %) | done |
 | **O3** | Read the three priority classes every 2 s, not every second | `enumerate.rs` (`PRIORITY_CACHE`) | ~1.9 ms/round (~10 %) | done |
 | **O7** | Align the three front-end timers | `src/App.vue`, `src/components/ProBalancePanel.vue` | minor | done |
-| **O6** | Cheaper process-table rows (fewer live components) | `src/App.vue` | frontend frame cost | **deferred** - virtual scrolling is a rewrite, needs its own issue |
+| **O6** | Cheaper process-table rows (fewer live components) | `src/components/ProcessTable.vue` (replaces `v-data-table` in `src/App.vue`) | frontend frame cost | **done** - virtual scrolling, step 3 |
 
 **Numbers are still the audit's, not re-measured.** Every saving above is the
 estimate from `PERFORMANCE.md`; see [§7](#7-implementation-status) for what has to
@@ -211,27 +211,38 @@ cost is that all 388 rows are live, and each row builds a `v-tooltip`, two
 `v-icon`s, a `v-chip` (tree mode) and one `div` per CCD. That is thousands of
 component instances patched every second.
 
-**Step 1 (no UX loss, do this first):** replace the per-row `v-tooltip` wrapper on
-the process name with a native `title` attribute on the same span. Removes 388
-component instances in one edit. Re-measure.
+**Decided: step 3, skipping steps 1 and 2.** Steps 1 and 2 were the incremental
+options; step 1 removes ~388 tooltip instances but leaves every row live, and step 2
+(pagination) changes the UX by hiding processes behind pages. Virtual scrolling
+fixes the actual cause — rows that are not on screen should not exist — without
+changing what the user sees, so it is the only step worth building.
 
-**Step 2 (if step 1 is not enough):** enable pagination — `items-per-page="100"`
-with the footer visible, instead of `items-per-page="-1"`.
-**This needs i18n work:** Vuetify's footer strings ("Items per page", "of") are
-English and would leak into a Chinese UI, which violates the house rule that every
-user-visible string goes through `src/i18n.ts`. Add the keys to both locales and
-pass them via the footer text props or a custom `#footer` slot; `npm run lint:i18n`
-must stay green.
+**Change:** a new `src/components/ProcessTable.vue` replaces `v-data-table`.
 
-**Step 3 (only if 1 + 2 are insufficient):** virtual scrolling — `v-virtual-scroll`
-with a hand-rolled header and row, losing the table's built-in sorting. This is a
-rewrite, not a tweak: it needs its own issue and its own decision.
+- Rows are a fixed 36 px and the header 40 px (Vuetify's `density="compact"`
+  metrics), so the window arithmetic is exact rather than measured: `startIndex`
+  and `endIndex` come from `scrollTop`, and only that slice is rendered, plus 6
+  rows of overscan above and below.
+- Sorting moves into the component, one column at a time. CPU, memory and priority
+  start descending, PID and name ascending; unreadable priorities (`-`) sort last
+  in both directions; ties break on PID so the order is stable.
+- The same six columns, the tree indentation, the expand chevron, the right-click
+  menu, the priority colours and the per-CCD affinity swatches are unchanged. The
+  header borrows VTable's `--fixed-header` background and inset shadow, and rows
+  borrow its hover background, so the swap is not visible.
+- The name tooltip stays a `v-tooltip`: at ~22 live rows its cost is irrelevant,
+  and it renders the executable path better than a native `title`.
+- The tree-mode child count comes from a `Map` built once per list change
+  (`countChildrenByPid`) instead of `countChildren`'s scan of the whole process
+  list per rendered row.
 
 **Acceptance:** a 10 s DevTools Performance recording while streaming, 388
 processes, flat and tree mode: report scripting + rendering per frame before and
 after. Sorting, tree expansion, and the right-click menu must all still work.
 
-**Risk:** step 2 changes UX; step 3 is a rewrite.
+**Risk:** a rewrite of the table, so the whole surface has to be re-checked by
+hand — but it is confined to one component and the columns cannot drift, since
+they are declared in one place.
 
 ### O7 — Align the three timers
 
@@ -258,7 +269,7 @@ stops polling.
 | 1 | O1 + O5 | Pure back end, no semantic change, and they move the baseline every later measurement is taken against | `cargo check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`, 10 s re-measure |
 | 2 | O4 | Highest value, needs the new pure-function tests | `cargo test -p cpum-core`, manual "apply twice ⇒ no writes" check, `--force` hatch |
 | 3 | O2 + O3 | Both caches; both need the same staleness review | Same as PR 1 + PID-reuse guard test + 2 s priority-freshness check |
-| 4 | O6 step 1 (+ step 2 if needed) | Front end only | `npx vue-tsc --noEmit`, `npm run lint:i18n`, DevTools recording |
+| 4 | O6 (virtual scrolling) | Front end only | `npx vue-tsc --noEmit`, `npm run lint:i18n`, `npm run build`, DevTools recording |
 | 5 | O7 | Cleanup | `npx vue-tsc --noEmit`, `npm run lint:i18n` |
 
 Cross-cutting for every PR: update `PERFORMANCE.md` numbers, add a `CHANGELOG.md`
@@ -285,8 +296,11 @@ Costs scale with process count, so re-measure rather than quoting old numbers.
 2. **O4 toast count: `applied + skipped`**, as proposed. Pressing "Apply Rules"
    twice reports the processes it verified rather than "0 processes", which reads
    as a bug even though it is the honest answer.
-3. **O6: deferred.** It needs virtual scrolling, which replaces the table's row
-   rendering rather than tuning it, so it gets its own issue.
+3. **O6: virtual scrolling (step 3), not the incremental steps.** Step 1 would take
+   ~388 tooltip instances off a table that still renders every row, and step 2
+   (pagination) trades away UX for a partial fix; virtual scrolling removes the
+   cause — off-screen rows — and keeps the table looking exactly as it does now.
+   See [§2 O6](#o6--cheaper-process-table-rows-front-end).
 4. **Where the audit lives:** `PERFORMANCE.md` is untracked and only present in
    the main worktree (`C:/Users/eason/rust/cpum/.workbuddy/`). It stays that way:
    it is a working document whose numbers are re-measured per machine, and it is
@@ -294,9 +308,7 @@ Costs scale with process count, so re-measure rather than quoting old numbers.
 
 ## 7. Implementation status
 
-O1, O2, O3, O4, O5 and O7 are implemented. O6 is deferred: it needs virtual
-scrolling, which is a rewrite of the process table rather than a tweak, so it
-gets its own issue.
+O1, O2, O3, O4, O5, O6 and O7 are implemented.
 
 What landed, in the shape described by §2:
 
@@ -318,6 +330,12 @@ What landed, in the shape described by §2:
   sight; `list_processes` passes `force = true`.
 - **O7** - `ProBalancePanel` exposes `poll()`; `App.vue` calls it on every second
   tick of the core-usage interval, which is now the only front-end timer.
+- **O6** - `ProcessTable.vue` renders only the viewport slice (fixed 36 px rows,
+  40 px header, 6 rows of overscan) and sorts in-component. `v-data-table` and the
+  `:deep(.v-data-table …)` CSS are gone from `App.vue`; the affinity swatch CSS
+  moved with the markup. `countChildrenByPid` replaces `countChildren`. Verified
+  by an SSR render of the component: 390 rows of input produce 22 rendered rows, a
+  14 040 px canvas and a CPU-descending row order.
 
 Still to do before `PERFORMANCE.md` can be updated with real numbers:
 
