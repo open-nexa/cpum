@@ -176,7 +176,14 @@ static PRIORITY_CACHE: Lazy<Mutex<PriorityCache>> = Lazy::new(|| {
 });
 
 struct PriorityCache {
-    values: HashMap<u32, ProcessPriorities>,
+    /// Keyed by PID, with the process creation time the entry was read from.
+    ///
+    /// Unlike the exe path, priorities *can* change - that is what the 2 s
+    /// refresh wave is for - but a PID can also be recycled, and a recycled PID
+    /// is "alive" as far as `prune_caches` is concerned. Without the creation
+    /// time, a new process would be served its predecessor's priority classes
+    /// until the next refresh wave. Same rule as `EXE_PATH_CACHE`.
+    values: HashMap<u32, (u64, ProcessPriorities)>,
     /// `None` = never refreshed, so the first round always reads.
     last_refresh: Option<Instant>,
 }
@@ -200,20 +207,30 @@ fn priority_refresh_due(force: bool) -> bool {
     }
 }
 
-fn priority_cache_read(pid: u32, handle: HANDLE, refresh_due: bool) -> ProcessPriorities {
+fn priority_cache_read(
+    pid: u32,
+    create_time: Option<u64>,
+    handle: HANDLE,
+    refresh_due: bool,
+) -> ProcessPriorities {
     // A process we have never seen has no cached value, so it is read on the
     // first round regardless of the refresh cadence - a new process must show
     // correct priorities immediately.
+    //
+    // Without a creation time there is no way to tell a recycled PID from the
+    // original one, so neither read from nor write to the cache.
     if !refresh_due {
-        if let Ok(cache) = PRIORITY_CACHE.lock() {
-            if let Some(p) = cache.values.get(&pid).copied() {
-                return p;
+        if let (Some(create_time), Ok(cache)) = (create_time, PRIORITY_CACHE.lock()) {
+            if let Some((cached_time, p)) = cache.values.get(&pid).copied() {
+                if cached_time == create_time {
+                    return p;
+                }
             }
         }
     }
     let priorities = read_priorities_with_handle(handle);
-    if let Ok(mut cache) = PRIORITY_CACHE.lock() {
-        cache.values.insert(pid, priorities);
+    if let (Some(create_time), Ok(mut cache)) = (create_time, PRIORITY_CACHE.lock()) {
+        cache.values.insert(pid, (create_time, priorities));
     }
     priorities
 }
@@ -277,7 +294,7 @@ fn sample_entry(
         (Some(h), partially_denied) => {
             let (pm, sm) = read_affinity_with_handle(h);
             let m = read_metrics_for_handle(h);
-            let priorities = priority_cache_read(entry.pid, h, priority_refresh_due);
+            let priorities = priority_cache_read(entry.pid, m.create_time, h, priority_refresh_due);
             let exe_path = exe_path_cached(entry.pid, m.create_time, h);
             close_handle(h);
             let snap = super::sampling::ProcessSnapshot {

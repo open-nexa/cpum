@@ -94,6 +94,15 @@ x64 and ARM64 NSIS installers, the signed updater artifacts, `latest.json` and
 - The ProBalance panel no longer runs its own 2 s timer; `App.vue` calls it from
   the 1 s ticker it already runs, so the per-core usage poll and the panel refresh
   stop landing in the same frame.
+- The process table is virtual-scrolled. `v-data-table` ran with
+  `items-per-page="-1"`, so every row was live in the DOM and every metrics tick
+  patched all ~390 of them even though only ~20 are on screen; the new
+  `src/components/ProcessTable.vue` renders the viewport plus a small overscan
+  instead. Sorting moved into the component (one column at a time; CPU, memory
+  and priority start descending). Columns, tree indentation, right-click menu,
+  priority colours and the per-CCD affinity swatches are unchanged, and the
+  tree-mode child count is now built once per list change instead of scanning
+  the process list once per row.
 - npm is the single supported package manager. `yarn.lock` is gone; use
   `npm ci` (CI) or `npm install` locally.
 - The whole Rust tree is formatted with rustfmt, and CI now blocks on
@@ -143,6 +152,23 @@ x64 and ARM64 NSIS installers, the signed updater artifacts, `latest.json` and
   now a file, `src-tauri/tauri.no-updater.conf.json`, so no shell is involved.
   The release workflow's unsigned branch had the same bug and uses the same
   file.
+- The process table sorted its rows globally even in tree mode, so a child with
+  a higher CPU figure than its parent moved away from it while keeping the
+  parent's indentation - expanding the parent no longer revealed its children.
+  Rows are now ordered within each sibling group instead, so every node keeps
+  its own subtree directly beneath it.
+- The process table clipped its right-hand columns in a narrow window with no
+  way to reach them. The columns have minimum widths and the body now scrolls
+  horizontally, with the header following the rows.
+- The 2-second priority cache was keyed on PID alone, so a recycled PID could
+  be served its predecessor's priority classes until the next refresh wave -
+  `prune_caches` only drops PIDs that have disappeared, and a recycled PID has
+  not. It now stores the process creation time and only reuses an entry when
+  the times match, which is what the exe-path cache already did.
+- `affinity_matches` read a `(0, 0)` affinity pair as "unconstrained" and could
+  therefore skip a soft rule on the strength of a read that never happened:
+  Windows never reports an affinity mask of 0, so a zero means the read failed.
+  Zero masks now count as unknown and take the write path.
 
 ## [0.1.1] — 2026-09-18
 

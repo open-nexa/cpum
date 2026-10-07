@@ -97,10 +97,18 @@ export function filterTree(nodes: ProcessNode[], whitelist: Set<number>): Proces
   return out;
 }
 
-export function countChildren(processes: ProcessInfo[], pid: number): number {
-  let cnt = 0;
-  for (const p of processes) if (p.parent_pid === pid) cnt++;
-  return cnt;
+/**
+ * Direct-child count for every pid, in one pass over the list.
+ *
+ * Replaces a per-row `countChildren()` scan: the tree-mode chip needs this for
+ * every rendered row, which was O(rows x processes) per render.
+ */
+export function countChildrenByPid(processes: ProcessInfo[]): Map<number, number> {
+  const counts = new Map<number, number>();
+  for (const p of processes) {
+    counts.set(p.parent_pid, (counts.get(p.parent_pid) ?? 0) + 1);
+  }
+  return counts;
 }
 
 /** Toggle a node's expand state (expanded = not collapsed by default) */

@@ -1,14 +1,15 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from "vue";
 import type { ProcessInfo, CpuScaleMode } from "./types";
-import { refreshDisplayCache, formatMemory, priorityClassLabel, ioPriorityLabel, memoryPriorityLabel, priorityClassColor } from "./types";
+import { refreshDisplayCache, formatMemory, priorityClassLabel } from "./types";
 import { getServiceStatus, getBridgeStatus, getProcessExePath, getLogicalProcessorUsage, installService, uninstallService, startService, stopService, type ServiceStatus, type BridgeStatus, type AffinityRule } from "./api";
 import type { LogicalProcessorUsage } from "./types";
-import type { SortItem, ViewMode } from "./constants";
+import type { ViewMode } from "./constants";
 import { useTopology } from "./composables/useTopology";
 import { useProcessManager } from "./composables/useProcessManager";
 import { useMetricsStream } from "./composables/useMetricsStream";
-import { buildProcessTree, flattenTree, computeSearchWhitelist, filterTree, countChildren, toggleTreeNodeExpand, type TableRow } from "./composables/useProcessTree";
+import { buildProcessTree, flattenTree, computeSearchWhitelist, filterTree, countChildrenByPid, toggleTreeNodeExpand, type TableRow } from "./composables/useProcessTree";
+import ProcessTable from "./components/ProcessTable.vue";
 import AffinityEditor from "./components/AffinityEditor.vue";
 import AffinityRuleManager from "./components/AffinityRuleManager.vue";
 import ProBalancePanel from "./components/ProBalancePanel.vue";
@@ -56,7 +57,6 @@ const metricsStream = useMetricsStream({
 // ---------- State ----------
 const viewMode = ref<ViewMode>("flat");
 const expandedPids = ref<number[]>([]);
-const sortBy = ref<readonly SortItem[]>([{ key: "cpu_usage_percent", order: "desc" }]);
 const tableCardRef = ref<HTMLElement | null>(null);
 const tableHeight = ref(480);
 const logicalProcessorUsage = ref<LogicalProcessorUsage[]>([]);
@@ -199,6 +199,9 @@ const toggleStreaming = metricsStream.toggle;
 
 const processCount = computed(() => processes.value.filter(p => !p.access_denied).length);
 
+// Tree-mode child-count chip: one pass per list change instead of a scan per row.
+const childCounts = computed(() => countChildrenByPid(processes.value));
+
 // Tree mode helpers
 const processTree = computed(() => buildProcessTree(processes.value));
 const searchWhitelist = computed(() => {
@@ -265,17 +268,6 @@ function openEditor(p: ProcessInfo) {
 
 function onApplied() {
   showSnack(t("rulesApplied"), "success");
-}
-
-/** Non-Normal priority tier coloring for the priority column (Realtime/High = orange-red; BelowNormal/Idle = blue-gray) */
-function prioStyle(p: ProcessInfo) {
-  const color = priorityClassColor(p.priority_class);
-  return color ? { color, fontWeight: 600 } : undefined;
-}
-
-/** Priority column tooltip: shows all three priority classes in detail */
-function priorityTooltip(p: ProcessInfo): string {
-  return `${t("prioCpu")}: ${priorityClassLabel(p.priority_class)}\n${t("prioIo")}: ${ioPriorityLabel(p.io_priority)}\n${t("prioMem")}: ${memoryPriorityLabel(p.memory_priority)}`;
 }
 
 function onRulesApplied(count: number) {
@@ -380,15 +372,12 @@ function copyText(text: string) {
   );
 }
 
-function rowProps(ctx: { item: ProcessInfo }) {
-  return {
-    onContextmenu: (e: MouseEvent) => openProcessContextMenu(e, ctx.item),
-    onClick: () => {
-      if (viewMode.value !== "tree") return;
-      const row = ctx.item as TableRow;
-      if (row._hasChildren) toggleTreeNodeExpand(row.pid, ctx.item, expandedPids.value);
-    },
-  };
+/** Row click: in tree mode a click anywhere on the row toggles the node (the
+ *  chevron is decorative — it has no handler of its own). */
+function onRowClick(row: ProcessInfo) {
+  if (viewMode.value !== "tree") return;
+  const treeRow = row as TableRow;
+  if (treeRow._hasChildren) toggleTreeNodeExpand(treeRow.pid, row, expandedPids.value);
 }
 
 // ---------- Lifecycle ----------
@@ -666,92 +655,9 @@ async function doStopService() {
         <!-- Process Table -->
         <div ref="tableCardRef">
           <v-card variant="outlined">
-            <v-data-table :items="tableRows" :headers="[
-              { title: 'PID', key: 'pid', sortable: true, width: '70px', minWidth: '70px' },
-              { title: viewMode === 'tree' ? t('nameTree') : t('name'), key: 'name', sortable: true, width: '200px', minWidth: '150px' },
-              { title: t('cpu'), key: 'cpu_usage_percent', sortable: true, width: '80px', minWidth: '80px', align: 'end' },
-              { title: t('memory'), key: 'memory_bytes', sortable: true, width: '100px', minWidth: '100px', align: 'end' },
-              { title: t('priority'), key: 'priority_class', sortable: true, width: '110px', minWidth: '110px' },
-              { title: t('affinity'), key: 'affinity', sortable: false, width: '150px', minWidth: '140px' },
-            ]"  :height="tableHeight" fixed-header density="compact" hover
-              :header-props="{ class: 'font-weight-bold' }" item-value="pid"
-              :row-props="rowProps" v-model:sort-by="sortBy"
-              items-per-page="-1" hide-default-footer>
-
-              <!-- PID -->
-              <template #item.pid="{ item }">
-                <code class="text-body-2">{{ item.pid }}</code>
-              </template>
-
-              <!-- Process Name -->
-              <template #item.name="{ item }">
-                <div class="d-flex align-center" :style="viewMode === 'tree' ? `padding-left: ${(item as any)._depth * 20}px` : ''">
-                  <template v-if="viewMode === 'tree'">
-                    <v-icon v-if="(item as any)._hasChildren" size="small" class="mr-1"
-                      :icon="expandedPids.includes(item.pid) ? 'mdi-chevron-down' : 'mdi-chevron-right'"
-                      @click.stop="toggleTreeNodeExpand(item.pid, item, expandedPids)" />
-                    <v-icon v-else size="small" class="mr-1" icon="mdi-minus" color="grey-lighten-1" />
-                  </template>
-                  <v-icon size="small" class="mr-2" :icon="item.name.endsWith('.exe') ? 'mdi-application' : 'mdi-cog'" color="grey" />
-                  <v-tooltip :text="item.exe_path ?? ''" location="top" :disabled="!item.exe_path">
-                    <template #activator="{ props }">
-                      <span class="text-body-2" v-bind="props">{{ item.name }}</span>
-                    </template>
-                  </v-tooltip>
-                  <v-chip v-if="viewMode === 'tree' && (item as any)._hasChildren" size="x-small" variant="tonal" class="ml-2">
-                    {{ countChildren(processes, item.pid) }}
-                  </v-chip>
-                </div>
-              </template>
-
-              <!-- CPU -->
-              <template #item.cpu_usage_percent="{ item }">
-                <span class="text-body-2 font-weight-medium" :style="{ color: item._display.cpu_color }">
-                  {{ item._display.cpu_text }}
-                </span>
-              </template>
-
-              <!-- Memory -->
-              <template #item.memory_bytes="{ item }">
-                <span v-if="item.memory_bytes > 0" class="text-body-2">{{ item._display.mem_text }}</span>
-                <span v-else class="text-medium-emphasis">-</span>
-              </template>
-
-              <!-- Priority -->
-              <template #item.priority_class="{ item }">
-                <span class="text-body-2" :style="prioStyle(item)" :title="priorityTooltip(item)">
-                  {{ priorityClassLabel(item.priority_class) }}
-                </span>
-              </template>
-
-              <!-- Affinity -->
-              <template #item.affinity="{ item }">
-                <div v-if="item.access_denied" class="text-medium-emphasis text-body-2">
-                  <v-icon icon="mdi-lock" size="small" class="mr-1" />{{ t('accessDenied') }}
-                </div>
-                <div v-else-if="!item.affinity_mask" class="text-medium-emphasis text-body-2">-</div>
-                <div v-else class="d-flex align-center">
-                  <div class="d-flex ga-1 flex-wrap">
-                    <div v-for="bar in item._display.ccd_bars" :key="bar.id" class="affinity-bar"
-                      :class="{ 'affinity-bar--empty': bar.enabled === 0 }"
-                      role="img"
-                      :aria-label="t('ccdBarTitle', { id: bar.id, enabled: bar.enabled, total: bar.total })"
-                      :title="t('ccdBarTitle', { id: bar.id, enabled: bar.enabled, total: bar.total })"
-                      :style="{ background: bar.enabled > 0 ? bar.color : 'transparent', borderColor: bar.enabled > 0 ? bar.color : undefined }">
-                      {{ bar.enabled }}
-                    </div>
-                  </div>
-                </div>
-              </template>
-
-              <!-- Empty State -->
-              <template #no-data>
-                <div class="text-center pa-6 text-medium-emphasis">
-                  <v-icon icon="mdi-database-off-outline" size="large" class="mb-2" />
-                  <div>{{ t('noData') }}</div>
-                </div>
-              </template>
-            </v-data-table>
+            <ProcessTable :items="tableRows" :height="tableHeight" :view-mode="viewMode"
+              :child-counts="childCounts" :expanded-pids="expandedPids"
+              @row-contextmenu="openProcessContextMenu" @row-click="onRowClick" />
           </v-card>
         </div>
       </v-container>
@@ -906,18 +812,6 @@ html, body {
   height: 100% !important;
   overflow: hidden !important;
 }
-/* Force fixed column widths - prevent resize on data change */
-:deep(.v-data-table table) {
-  table-layout: fixed !important;
-  width: 100% !important;
-}
-:deep(.v-data-table th),
-:deep(.v-data-table td) {
-  overflow: hidden !important;
-  text-overflow: ellipsis !important;
-  white-space: nowrap !important;
-}
-
 .core-usage {
   width: 54px;
   font-size: 11px;
@@ -960,27 +854,6 @@ html, body {
 </style>
 
 <style scoped>
-.affinity-bar {
-  width: 20px;
-  height: 20px;
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid;
-  border-radius: 4px;
-  font-size: 11px;
-  font-weight: 600;
-  color: #fff;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
-  cursor: help;
-  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
-}
-.affinity-bar--empty {
-  border-color: rgba(128, 128, 128, 0.28);
-  color: rgba(128, 128, 128, 0.75);
-  text-shadow: none;
-}
 .cpu-info-bar :deep(.v-chip) {
   font-weight: 500;
 }
