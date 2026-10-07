@@ -76,6 +76,14 @@ x64 and ARM64 NSIS installers, the signed updater artifacts, `latest.json` and
   - `actions/dependency-review-action` is pinned to `v5.0.0` instead of the `@v5`
     dependabot asks for: that repository publishes no floating `v5` tag, so `@v5`
     does not resolve.
+  - The two third-party actions in `release.yml` are now pinned to the commit
+    behind their tag rather than to the tag itself —
+    `SignPath/github-action-submit-signing-request` at `f6d0478` (its `v3` is a
+    lightweight tag) and `softprops/action-gh-release` at `efb3536` (`v3` is
+    annotated, so this is the dereferenced commit). CodeQL's `actions` analysis
+    reports "Unpinned tag for a non-immutable Action" for any mutable ref, and
+    bumping those two lines is enough for it to count both as alerts introduced
+    by the change, even though the tags were already floating before it.
 - The dynamic optimization (ProBalance) panel is now flagged as **Unstable** in
   the UI, both in the toolbar tooltip and as a chip next to the panel title, so
   it is clear the engine is still experimental.

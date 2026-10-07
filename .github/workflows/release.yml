@@ -311,7 +311,12 @@ jobs:
 
       - name: Request SignPath signatures
         if: ${{ steps.signing-config.outputs.enabled == 'true' }}
-        uses: SignPath/github-action-submit-signing-request@v3
+        # Pinned to the commit the v3 tag resolves to, not to the tag: CodeQL's
+        # `actions` analysis flags any third-party action referenced by a
+        # mutable ref ("Unpinned tag for a non-immutable Action"), and both of
+        # these are third-party. v3 is a lightweight tag here, so the tag and
+        # the commit are the same object.
+        uses: SignPath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3
         with:
           api-token: ${{ env.SIGNPATH_API_TOKEN }}
           organization-id: ${{ env.SIGNPATH_ORGANIZATION_ID }}
@@ -404,7 +409,10 @@ jobs:
           Get-Content 'release-artifacts/SHA256SUMS.txt'
 
       - name: Publish GitHub release
-        uses: softprops/action-gh-release@v3
+        # Pinned to the commit behind the v3 tag (an annotated tag, so the
+        # commit is the dereferenced `v3^{}`) for the same CodeQL reason as the
+        # SignPath step above.
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           generate_release_notes: true
           files: |
