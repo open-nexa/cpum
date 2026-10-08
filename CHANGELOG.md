@@ -8,15 +8,23 @@ Pushing a `v*` tag runs `.github/workflows/release.yml`, which publishes the
 x64 and ARM64 NSIS installers, the signed updater artifacts, `latest.json` and
 `SHA256SUMS.txt` in one GitHub release.
 
-## [Unreleased]
+## [0.2.0] — 2026-10-08
+
+The "people can actually find and install it" release, plus the performance pass
+that came out of profiling the metrics pipeline. The feature set is the one 0.1.0
+shipped; what changed is how reachable it is, how honest the numbers in it are,
+and how much work the app does per second to show you the same table. **Read the
+[upgrade notes](docs/releases/v0.2.0.md#upgrading-from-01x) before replacing an
+installation** — the bundle identifier changed, so 0.1.0 must be uninstalled
+first.
 
 ### Added
 
 - Both READMEs now have an **Install** section — until now neither said where the
   installer comes from — covering the two architectures, the checksum check, the
-  SmartScreen warning shown on unsigned installers, and the fact that 0.1.1 and
-  older have to be upgraded by hand. A navigation line at the top of each README
-  links the rest of the document.
+  SmartScreen warning shown on unsigned installers, and the fact that 0.1.1
+  and older have to be upgraded by hand. A navigation line at the top of each
+  README links the rest of the document.
 - A download page at [open-nexa.github.io/cpum](https://open-nexa.github.io/cpum/),
   published from `docs/releases/` by `.github/workflows/pages.yml`. Links are read
   from the GitHub releases API and classified in `docs/releases/assets/releases.js`;
