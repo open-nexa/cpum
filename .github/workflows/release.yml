@@ -157,7 +157,7 @@ jobs:
 
       - name: Upload updater diagnostics
         if: ${{ always() }}
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: updater-diagnostics-${{ matrix.architecture }}
           path: updater-diagnostics/*
@@ -240,14 +240,14 @@ jobs:
           }
 
       - name: Upload installer
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: windows-${{ matrix.architecture }}-installer
           path: release-artifact/installer/*
           if-no-files-found: error
 
       - name: Upload updater artifacts
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: windows-${{ matrix.architecture }}-updater
           path: release-artifact/updater-${{ matrix.architecture }}/*
@@ -265,14 +265,14 @@ jobs:
 
     steps:
       - name: Download installers
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           pattern: windows-*-installer
           merge-multiple: true
           path: unsigned-installers
 
       - name: Download updater artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           pattern: windows-*-updater
           merge-multiple: true
@@ -303,7 +303,7 @@ jobs:
       - name: Upload installers for SignPath
         id: upload-unsigned-installers
         if: ${{ steps.signing-config.outputs.enabled == 'true' }}
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: unsigned-installers-for-signpath
           path: unsigned-installers/*-setup.exe
