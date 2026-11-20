@@ -173,20 +173,8 @@ pub fn save_config(base_dir: &Path, config: &ProBalanceConfig) -> Result<(), Str
 /// Atomic file write: write to a same-named `.tmp` file first, then rename
 /// to replace.
 ///
-/// The service rewrites the status file every second and the GUI can read
-/// it at any time. A direct `fs::write` lets readers hit half-written JSON
-/// (the status panel flashes "service offline" and the config hot-reload
-/// fails to parse until the next change). Rust's `fs::rename` on Windows
-/// goes through `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`, which is an
-/// atomic switch from the reader's perspective.
-pub(super) fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, contents).map_err(|e| format!("failed to write temp file: {e}"))?;
-    match std::fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp); // Clean up leftovers; the next write recreates it.
-            Err(format!("failed to atomically replace file: {e}"))
-        }
-    }
-}
+/// The implementation lives in [`crate::store`] and is shared with the rule
+/// file: the service rewrites the status file every second and the GUI can
+/// read it at any time, so a half-written file would make the status panel
+/// flash "service offline" and break the config hot-reload.
+pub use crate::store::atomic_write;

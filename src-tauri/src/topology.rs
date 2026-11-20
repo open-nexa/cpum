@@ -333,6 +333,37 @@ fn restore_process_affinity(original: usize) {
     }
 }
 
+/// Restores the process-level affinity mask when it goes out of scope.
+///
+/// The probe widens the app's own affinity to the full system mask so it
+/// can pin a thread to every logical processor. Every normal exit restores
+/// it, but a panic would skip those calls - and the app would keep running
+/// with a widened affinity for the rest of the session. A drop guard covers
+/// the panic path as well.
+struct ProcessAffinityGuard(Option<usize>);
+
+impl ProcessAffinityGuard {
+    fn new(original: usize) -> Self {
+        Self(Some(original))
+    }
+
+    /// Restore now and disarm the guard (for the paths that restore
+    /// explicitly).
+    fn restore_now(&mut self) {
+        if let Some(mask) = self.0.take() {
+            restore_process_affinity(mask);
+        }
+    }
+}
+
+impl Drop for ProcessAffinityGuard {
+    fn drop(&mut self) {
+        if let Some(mask) = self.0.take() {
+            restore_process_affinity(mask);
+        }
+    }
+}
+
 /// Try to identify each logical processor's Die_ID via CPUID.
 /// Method priority (aligned with Process Lasso / LibreHardwareMonitor):
 ///   1. Fn8000_001E (Processor Topology Enum) -> ECX[7:0] = Node_ID = CCD
@@ -365,14 +396,16 @@ fn detect_die_by_cpuid(total_lps_guess: u32) -> Option<Vec<u32>> {
     // First expand the process-level affinity to system_mask (to escape any
     // low-16-LP limit set by the parent / launcher).
     let (orig_proc_mask, sys_mask) = expand_process_affinity_to_system()?;
+    // The guard restores the process-level mask on every exit path,
+    // including a panic.
+    let mut affinity_guard = ProcessAffinityGuard::new(orig_proc_mask);
     let old_affinity = unsafe { SetThreadAffinityMask(thread, sys_mask) };
     if old_affinity == 0 {
         // Even if the thread-level mask can't be set back, try to restore the
         // process-level mask
-        restore_process_affinity(orig_proc_mask);
+        affinity_guard.restore_now();
         return None;
     }
-    let orig_proc_for_cleanup = Some(orig_proc_mask);
 
     // ------------------------------------------------------------------
     // One round of pinning reads all three candidate fields at once, to
@@ -520,9 +553,7 @@ fn detect_die_by_cpuid(total_lps_guess: u32) -> Option<Vec<u32>> {
                         result[lp] = (per_lp[lp].x2apic >> bit) & 1;
                     }
                     restore();
-                    if let Some(opm) = orig_proc_for_cleanup {
-                        restore_process_affinity(opm);
-                    }
+                    affinity_guard.restore_now();
                     return Some(result);
                 }
             }
@@ -550,18 +581,14 @@ fn detect_die_by_cpuid(total_lps_guess: u32) -> Option<Vec<u32>> {
                     *value = if lp < half { 0 } else { 1 };
                 }
                 restore();
-                if let Some(opm) = orig_proc_for_cleanup {
-                    restore_process_affinity(opm);
-                }
+                affinity_guard.restore_now();
                 return Some(result);
             }
         }
     }
 
     restore();
-    if let Some(opm) = orig_proc_for_cleanup {
-        restore_process_affinity(opm);
-    }
+    affinity_guard.restore_now();
     None
 }
 

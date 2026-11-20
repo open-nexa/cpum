@@ -8,6 +8,118 @@ Pushing a `v*` tag runs `.github/workflows/release.yml`, which publishes the
 x64 and ARM64 NSIS installers, the signed updater artifacts, `latest.json` and
 `SHA256SUMS.txt` in one GitHub release.
 
+## [Unreleased]
+
+The result of a full code review of the whole codebase (`cpum-core`, the service
+daemon, the Tauri backend and the frontend). Most of it is bug fixing; one entry
+is a behaviour change users will notice.
+
+### Fixed
+
+- **ProBalance and Game Mode never engaged when the service was installed**
+  ([#34](https://github.com/open-nexa/cpum/issues/34)). The service runs as
+  `LocalSystem` in Session 0, where `GetForegroundWindow` and
+  `SHQueryUserNotificationState` describe only that session's empty desktop, so
+  foreground detection always returned `pid: None` / `fullscreen: false`:
+  `probalance_status.json` stayed at `fg_pid: null`, no decision was ever
+  journaled, and Game Mode never activated. The old `OpenInputDesktop` /
+  `SetThreadDesktop` trick could not bridge sessions either, and fails with
+  `ERROR_BUSY` in any process that owns windows — so it was also broken for a
+  GUI-side runtime. The GUI now samples the foreground window once per second
+  and relays it to the service over the authenticated named-pipe bridge; the
+  service caches the report with a 4-second TTL and passes it into every
+  ProBalance tick. The service remains the privileged executor of downgrades
+  and priority boosts. A missing or expired report is treated as "no
+  foreground known" (new `foreground_signal: false` in the status file) and
+  the panel shows a hint rather than silently doing nothing. **Behaviour
+  change:** ProBalance / Game Mode need the app running; rule enforcement
+  still continues in the background with the app closed. Both READMEs document
+  this, and the "no need to keep the app open" install message was corrected.
+- **ProBalance measured CPU usage 10,000,000× too high.** The service-side sampler
+  (`monitor.rs`) divided the raw `GetProcessTimes` delta by the wall-clock delta
+  without converting the 100-nanosecond tick units to seconds. A process using one
+  full core read as 1,000,000,000 % instead of 100 %, so the `fg_cpu_threshold`
+  (default 100 = one full core) was reached after 100 ns of CPU per second and the
+  `bg_cpu_threshold` (default 40) after 40 ns — meaning **virtually every background
+  process was downgraded to `BelowNormal` + `VeryLow` and never restored** while
+  ProBalance was enabled. The scale now lives in one shared helper
+  (`monitor::cpu_percent_from_ticks`) that both the service sampler and the GUI's
+  metrics stream use, so the two cannot drift apart again.
+- **A single invalid rule stopped every rule from being enforced.** The apply pass
+  aborted on the first rule that failed validation, so one hand-edited or migrated
+  entry in `affinity_rules.json` silently disabled the whole rule set on every
+  5-second service tick. Invalid rules are now skipped and logged; the rest of the
+  pass runs as normal.
+- **The rule file is now written atomically.** A crash during the save used to leave
+  a truncated file behind, which then failed to parse — and an unparsable rule file
+  means no rule is applied at all, silently. The save goes through a temp file and
+  an atomic rename, the same helper the ProBalance config already used.
+- **The app no longer freezes while it waits for you.** Tauri runs a synchronous
+  command body on the UI thread, so the CPU-topology probe (1–2 s), the process
+  enumeration, the rule-apply pass and every service-management call blocked the
+  window — for up to two minutes while the UAC prompt was open. All of them now run
+  on a blocking worker, exactly like `get_service_status` already did.
+- **Service management no longer fails with a bogus "timed out (8 seconds)".** The
+  elevated `sc.exe` calls (install / uninstall / start / stop) used the short timeout
+  meant for plain queries, while the elevated helper for affinity changes used the
+  120 s one. A user who took longer than 8 s to answer the UAC prompt got a failure
+  even though the operation had succeeded — and the "service installed" marker was
+  never written, so an upgrade did not restore the service.
+- **The privileged bridge no longer hangs or leaks its token.** Three separate
+  problems: the service treated `ERROR_PIPE_CONNECTED` (a client that connected
+  before the server called `ConnectNamedPipe`) as a failure and dropped the
+  connection, leaving the client waiting for a reply that never came; the pipe read
+  had no timeout at all; and the pipe had a fixed, machine-global name that any local
+  process could claim before the service started, handing it the bridge token — the
+  only credential that authorises asking a SYSTEM service to change any process on
+  the machine. The pipe name is now derived from the shared token (so it cannot be
+  guessed), the service claims it exclusively and refuses to serve a name it could
+  not claim, and the client runs the round trip with a 30 s deadline.
+- **ProBalance restores no longer fight the rule engine.** A restore wrote the
+  pre-downgrade priority back over a priority the rule engine had re-applied in the
+  meantime, so the two engines oscillated. The restore now checks the current value
+  first and leaves it alone when another owner holds it. A restore whose write
+  *failed* is also no longer logged as a successful restore — that logged entry
+  paired the downgrade away, so crash recovery never repaired it.
+- **A failed sampling round no longer strands downgraded processes.** An empty or
+  failed sample list was read as "every process exited", which emitted exit-restore
+  events for all tracked processes — and the exit path never writes the original
+  values back. The tick is now skipped instead, and retried a second later.
+- **An interrupted Game Mode boost is cleaned up at startup.** The boost was
+  journalled but never reconciled, so a crash left the foreground process at
+  `AboveNormal` forever. It is now treated as an orphan and restored.
+- **The metrics stream can no longer end up with two producer threads.** The stop
+  flag was global, so a stop → start sequence let the old thread see "running"
+  again and continue; both threads then emitted the same waves and overwrote the
+  shared sampling baseline. Each producer now has its own stop flag, and stopping
+  waits for it to finish.
+- **The Affinity (CCD) column no longer stays blank.** With a cold topology cache
+  the columns were computed before the topology was known and never recomputed.
+- **Opening the ProBalance panel no longer writes the config back.** The auto-save
+  watcher fired on the load-induced assignment (the assignment queues the watcher,
+  which then runs after the "loaded" flag was already set), so every open wrote the
+  just-loaded config to disk. The watcher now compares against the loaded snapshot.
+- **Priority values are validated before they are written.** The single-process
+  path and the elevated helper applied whatever they were handed — including an IO
+  priority of 3, which the kernel accepts but the rule model forbids. Both now use
+  the ranges from `cpum_core::rule`.
+- **Backend error messages are translated.** Raw Rust strings reached the UI
+  untranslated, which the i18n guard cannot catch. They now go through the
+  dictionary.
+- **The CPU-topology probe restores the app's affinity even if it panics**, via a
+  drop guard.
+- The unused `opener` plugin and its `allow-open-url` / `allow-reveal-item-in-dir`
+  permissions were removed from the capability set — the app never used them, and
+  they granted more reach than the app needs.
+
+### Changed
+
+- The privileged bridge now uses a pipe name derived from the shared token instead
+  of the fixed `\\.\pipe\cpum-bridge-v1`. The service reads the token from the
+  per-user data directory, exactly as before; only the name changed. The service
+  creates the token's file at install time, so the bridge is available as soon as
+  the service is installed.
+
 ## [0.2.0] — 2026-10-08
 
 The "people can actually find and install it" release, plus the performance pass

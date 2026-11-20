@@ -15,6 +15,7 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::Mutex;
+use std::time::Duration;
 use tauri::{Emitter, Manager, Runtime};
 use uuid::Uuid;
 
@@ -29,6 +30,11 @@ fn apply_priorities_locally(
     io_priority: Option<u32>,
     memory_priority: Option<u32>,
 ) -> Result<(), String> {
+    // Validate before writing: the Win32 calls accept whatever they are
+    // handed (the undocumented IO priority in particular accepts values the
+    // rule model forbids), and an out-of-range value would otherwise reach
+    // the kernel and fail there with an opaque Win32 error.
+    validate_priority_values(priority_class, io_priority, memory_priority)?;
     if let Some(value) = priority_class {
         cpum_core::procwin::set_process_priority_class(pid, value)?;
     }
@@ -41,64 +47,111 @@ fn apply_priorities_locally(
     Ok(())
 }
 
+/// Reject priority values outside the documented ranges.
+///
+/// The rule model already owns these ranges ([`cpum_core::rule`]); the
+/// single-process path and the elevated helper must use the same rules, or
+/// the same value would be accepted in one path and rejected in another.
+fn validate_priority_values(
+    priority_class: Option<u32>,
+    io_priority: Option<u32>,
+    memory_priority: Option<u32>,
+) -> Result<(), String> {
+    if let Some(pc) = priority_class {
+        if !cpum_core::rule::valid_priority_class(pc) {
+            return Err(format!("invalid CPU priority class: 0x{pc:X}"));
+        }
+    }
+    if let Some(io) = io_priority {
+        if !cpum_core::rule::valid_io_priority(io) {
+            return Err(format!(
+                "invalid IO priority: {io} (allowed: 0=Very Low, 1=Low, 2=Normal)"
+            ));
+        }
+    }
+    if let Some(mp) = memory_priority {
+        if !cpum_core::rule::valid_memory_priority(mp) {
+            return Err(format!(
+                "invalid memory priority: {mp} (allowed 1=Very Low ... 5=Normal)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Set the priority classes of a process.
+///
+/// The privileged fallbacks (the service bridge, then a one-off elevated
+/// launch) block for as long as the service or the UAC prompt takes, so the
+/// whole command runs on a blocking worker.
 #[tauri::command]
-fn set_process_priority<R: Runtime>(
+async fn set_process_priority<R: Runtime>(
     app: tauri::AppHandle<R>,
     pid: u32,
     priority_class: Option<u32>,
     io_priority: Option<u32>,
     memory_priority: Option<u32>,
 ) -> Result<(), String> {
-    let mut failure =
-        apply_priorities_locally(pid, priority_class, io_priority, memory_priority).err();
-    let mut privileged_result: Option<cpum_core::procwin::ProcessPriorities> = None;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut failure =
+            apply_priorities_locally(pid, priority_class, io_priority, memory_priority).err();
+        let mut privileged_result: Option<cpum_core::procwin::ProcessPriorities> = None;
 
-    if let Some(error) = &failure {
-        if is_access_denied_error(error) {
-            match bridge_set_priority(&app, pid, priority_class, io_priority, memory_priority) {
-                Ok(response) => {
-                    privileged_result = response.priorities;
-                    failure = None;
-                }
-                Err(bridge_error) => {
-                    if !elevation_failed(pid) {
-                        match elevated_set_priority(
-                            pid,
-                            priority_class,
-                            io_priority,
-                            memory_priority,
-                        ) {
-                            Ok(()) => failure = None,
-                            Err(elevated_error) => {
-                                mark_elevation_failed(pid);
-                                failure = Some(format!(
-                                    "{error}\nvia service: {bridge_error}\nvia elevation: {elevated_error}"
-                                ));
+        if let Some(error) = &failure {
+            if is_access_denied_error(error) {
+                match bridge_set_priority(&app, pid, priority_class, io_priority, memory_priority) {
+                    Ok(response) => {
+                        privileged_result = response.priorities;
+                        failure = None;
+                    }
+                    Err(bridge_error) => {
+                        if !elevation_failed(pid) {
+                            match elevated_set_priority(
+                                pid,
+                                priority_class,
+                                io_priority,
+                                memory_priority,
+                            ) {
+                                Ok(()) => failure = None,
+                                Err(elevated_error) => {
+                                    mark_elevation_failed(pid);
+                                    failure = Some(format!(
+                                        "{error}\nvia service: {bridge_error}\nvia elevation: {elevated_error}"
+                                    ));
+                                }
                             }
                         }
                     }
                 }
             }
         }
-    }
 
-    if let Some(error) = failure {
-        return Err(error);
-    }
+        if let Some(error) = failure {
+            return Err(error);
+        }
 
-    // Prefer the values the service read back; reading them locally would fail
-    // for exactly the processes that needed the service in the first place.
-    let current =
-        privileged_result.unwrap_or_else(|| cpum_core::procwin::get_process_priorities(pid));
-    let _ = app.emit("process://priority-updated", serde_json::json!({ "pid": pid, "priority_class": current.priority_class, "io_priority": current.io_priority, "memory_priority": current.memory_priority }));
-    Ok(())
+        // Prefer the values the service read back; reading them locally would fail
+        // for exactly the processes that needed the service in the first place.
+        let current =
+            privileged_result.unwrap_or_else(|| cpum_core::procwin::get_process_priorities(pid));
+        let _ = app.emit("process://priority-updated", serde_json::json!({ "pid": pid, "priority_class": current.priority_class, "io_priority": current.io_priority, "memory_priority": current.memory_priority }));
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("priority change task failed: {e}"))?
 }
 
 /// Return the current system's CPU topology (logical processors / physical
 /// cores / CCD).
+///
+/// The full detection pins a thread per logical processor and takes 1-2 s, so
+/// it runs on a blocking worker: a synchronous command body would block the
+/// UI thread for the whole probe.
 #[tauri::command]
-fn get_cpu_topology() -> Result<CpuTopology, String> {
-    topology::get_cpu_topology()
+async fn get_cpu_topology() -> Result<CpuTopology, String> {
+    tauri::async_runtime::spawn_blocking(topology::get_cpu_topology)
+        .await
+        .map_err(|e| format!("topology detection task failed: {e}"))?
 }
 
 /// Enumerate all processes with their current CPU affinity (called for the
@@ -106,20 +159,26 @@ fn get_cpu_topology() -> Result<CpuTopology, String> {
 /// When finished, the process list cache is written automatically, so the next
 /// startup can read it in <1ms.
 #[tauri::command]
-fn list_processes<R: Runtime>(app: tauri::AppHandle<R>) -> Result<Vec<ProcessInfo>, String> {
-    let result = process::list_processes()?;
-    // Write cache asynchronously (failures are silently ignored)
-    if let Ok(cache_dir) = app.path().app_data_dir() {
-        process::save_processes_cache(&cache_dir, &result);
-    }
-    Ok(result)
+async fn list_processes<R: Runtime>(app: tauri::AppHandle<R>) -> Result<Vec<ProcessInfo>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = process::list_processes()?;
+        // Write cache asynchronously (failures are silently ignored)
+        if let Ok(cache_dir) = app.path().app_data_dir() {
+            process::save_processes_cache(&cache_dir, &result);
+        }
+        Ok(result)
+    })
+    .await
+    .map_err(|e| format!("process list task failed: {e}"))?
 }
 
 /// Ultra-lightweight fast scan (PID / name / parent_pid only), returns in
 /// <20ms, used to show first-frame content immediately.
 #[tauri::command]
-fn list_processes_light() -> Result<Vec<ProcessInfo>, String> {
-    process::list_processes_light()
+async fn list_processes_light() -> Result<Vec<ProcessInfo>, String> {
+    tauri::async_runtime::spawn_blocking(process::list_processes_light)
+        .await
+        .map_err(|e| format!("process scan task failed: {e}"))?
 }
 
 /// Load the process list cache from the previous run (<1ms). Returns an empty
@@ -223,6 +282,45 @@ fn bridge_apply_rules<R: Runtime>(
     bridge_response(cpum_core::ipc::request(&request)?)
 }
 
+// ---------- Foreground observation relay (issue #34) ----------
+
+/// The service runs as `LocalSystem` in Session 0 and cannot see the
+/// interactive desktop, so ProBalance's foreground detection must come from a
+/// process that does. This app is that process: sample the foreground window
+/// once per second and relay it over the authenticated bridge.
+///
+/// The service expires the report after a few seconds, so closing the app
+/// pauses ProBalance / Game Mode instead of leaving the engine to act on a
+/// stale PID. Rules are unaffected - the service keeps enforcing them with no
+/// app open.
+fn start_foreground_reporter<R: Runtime>(app: tauri::AppHandle<R>) {
+    std::thread::spawn(move || {
+        let token = match rules_dir(&app).and_then(|dir| cpum_core::ipc::ensure_token(&dir)) {
+            Ok(token) => token,
+            Err(error) => {
+                eprintln!("cpum: foreground reporter disabled: {error}");
+                return;
+            }
+        };
+        loop {
+            let state = cpum_core::monitor::get_foreground_state();
+            let request = cpum_core::ipc::Request::ReportForeground {
+                token: token.clone(),
+                state,
+            };
+            // The service is optional, and an older service rejects the new
+            // request with `ok: false` rather than a transport error. Treat
+            // both as "not reporting" and back off so a machine without a
+            // compatible service does not try to open a missing pipe every
+            // second; a running, compatible service reports every second.
+            let reachable = cpum_core::ipc::request(&request)
+                .map(|response| response.ok)
+                .unwrap_or(false);
+            std::thread::sleep(Duration::from_secs(if reachable { 1 } else { 5 }));
+        }
+    });
+}
+
 /// Re-launch the bundled service binary elevated for a single operation.
 /// This is the last-resort path: it shows one UAC prompt.
 fn run_elevated_helper(arguments: &[String], description: &str) -> Result<String, String> {
@@ -313,54 +411,58 @@ fn elevated_set_priority(
 /// `mask` is passed as a hex string (e.g. "0xFF") to support the all-ones
 /// 64-bit case.
 #[tauri::command]
-fn set_process_affinity<R: Runtime>(
+async fn set_process_affinity<R: Runtime>(
     app: tauri::AppHandle<R>,
     pid: u32,
     mask: String,
     mode: Option<RuleMode>,
     group_masks: Option<Vec<String>>,
 ) -> Result<(), String> {
-    let mode = mode.unwrap_or_default();
-    let hex_masks: Vec<String> = group_masks.clone().unwrap_or_else(|| vec![mask.clone()]);
-    let masks = match group_masks {
-        Some(values) => cpum_core::procwin::GroupMasks::from_hex_list(&values)?.0,
-        None => vec![cpum_core::procwin::parse_hex_mask(&mask)?],
-    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let mode = mode.unwrap_or_default();
+        let hex_masks: Vec<String> = group_masks.clone().unwrap_or_else(|| vec![mask.clone()]);
+        let masks = match group_masks {
+            Some(values) => cpum_core::procwin::GroupMasks::from_hex_list(&values)?.0,
+            None => vec![cpum_core::procwin::parse_hex_mask(&mask)?],
+        };
 
-    let mut failure = cpum_core::procwin::set_affinity_by_group_masks(pid, &masks, mode).err();
+        let mut failure = cpum_core::procwin::set_affinity_by_group_masks(pid, &masks, mode).err();
 
-    if let Some(error) = &failure {
-        if is_access_denied_error(error) {
-            match bridge_set_affinity(&app, pid, &hex_masks, mode) {
-                Ok(()) => failure = None,
-                Err(bridge_error) => {
-                    if !elevation_failed(pid) {
-                        match elevated_set_affinity(pid, &hex_masks, mode) {
-                            Ok(()) => failure = None,
-                            Err(elevated_error) => {
-                                // Remember the PID: a protected process would
-                                // otherwise trigger a UAC prompt on every retry.
-                                mark_elevation_failed(pid);
-                                failure = Some(format!(
-                                    "{error}\nvia service: {bridge_error}\nvia elevation: {elevated_error}"
-                                ));
+        if let Some(error) = &failure {
+            if is_access_denied_error(error) {
+                match bridge_set_affinity(&app, pid, &hex_masks, mode) {
+                    Ok(()) => failure = None,
+                    Err(bridge_error) => {
+                        if !elevation_failed(pid) {
+                            match elevated_set_affinity(pid, &hex_masks, mode) {
+                                Ok(()) => failure = None,
+                                Err(elevated_error) => {
+                                    // Remember the PID: a protected process would
+                                    // otherwise trigger a UAC prompt on every retry.
+                                    mark_elevation_failed(pid);
+                                    failure = Some(format!(
+                                        "{error}\nvia service: {bridge_error}\nvia elevation: {elevated_error}"
+                                    ));
+                                }
                             }
                         }
                     }
                 }
             }
         }
-    }
 
-    let Some(error) = failure else {
-        // On success, push an event to the frontend immediately so it can patch
-        // the corresponding row's mask in place without a full table refresh.
-        let new_mask_hex = masks.first().copied().map(mask_to_hex);
-        let payload = process::build_affinity_updated_event(pid, new_mask_hex);
-        let _ = app.emit("process://affinity-updated", payload);
-        return Ok(());
-    };
-    Err(error)
+        let Some(error) = failure else {
+            // On success, push an event to the frontend immediately so it can patch
+            // the corresponding row's mask in place without a full table refresh.
+            let new_mask_hex = masks.first().copied().map(mask_to_hex);
+            let payload = process::build_affinity_updated_event(pid, new_mask_hex);
+            let _ = app.emit("process://affinity-updated", payload);
+            return Ok(());
+        };
+        Err(error)
+    })
+    .await
+    .map_err(|e| format!("affinity change task failed: {e}"))?
 }
 
 // ---------- Metrics staged push stream ----------
@@ -381,9 +483,13 @@ fn start_metrics_stream<R: Runtime>(
 }
 
 /// Stop the backend metrics push stream (paused).
+/// Stopping waits for the producer thread to finish its current round, so it
+/// runs on a blocking worker instead of the UI thread.
 #[tauri::command]
-fn stop_metrics_stream() -> Result<(), String> {
-    process::stop_metrics_stream_in_thread()
+async fn stop_metrics_stream() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(process::stop_metrics_stream_in_thread)
+        .await
+        .map_err(|e| format!("metrics stop task failed: {e}"))?
 }
 
 // ---------- CPU topology cache (faster startup; CPU topology almost never changes) ----------
@@ -463,8 +569,10 @@ fn legacy_rules_dirs() -> Vec<PathBuf> {
 }
 
 #[tauri::command]
-fn get_logical_processor_usage() -> Result<Vec<process::LogicalProcessorUsage>, String> {
-    process::sample_logical_processor_usage()
+async fn get_logical_processor_usage() -> Result<Vec<process::LogicalProcessorUsage>, String> {
+    tauri::async_runtime::spawn_blocking(process::sample_logical_processor_usage)
+        .await
+        .map_err(|e| format!("processor usage task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -638,8 +746,18 @@ fn delete_affinity_rule<R: Runtime>(app: tauri::AppHandle<R>, id: String) -> Res
 
 /// Apply all enabled affinity rules to the currently running processes.
 /// Returns the number of processes the rules were applied to.
+///
+/// Enumerating every process and writing the affinity masks takes a while,
+/// and the service bridge adds a round trip on top, so the command runs on a
+/// blocking worker instead of the UI thread.
 #[tauri::command]
-fn apply_affinity_rules<R: Runtime>(app: tauri::AppHandle<R>) -> Result<u32, String> {
+async fn apply_affinity_rules<R: Runtime>(app: tauri::AppHandle<R>) -> Result<u32, String> {
+    tauri::async_runtime::spawn_blocking(move || apply_affinity_rules_blocking(app))
+        .await
+        .map_err(|e| format!("rule apply task failed: {e}"))?
+}
+
+fn apply_affinity_rules_blocking<R: Runtime>(app: tauri::AppHandle<R>) -> Result<u32, String> {
     let rules = load_affinity_rules(app.clone())?;
     let report = cpum_core::engine::apply_rules(&rules)?;
     // Processes that already match their rule are counted too: from the user's
@@ -844,9 +962,14 @@ fn run_elevated_sc(command: &str, description: &str) -> Result<Output, String> {
     let ps_cmd = format!(
         "$p = Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', '{escaped_path}' -Verb RunAs -Wait -PassThru; exit $p.ExitCode"
     );
-    let result = run_command_with_timeout(
+    // The elevated call waits for the user to answer the UAC prompt, which
+    // takes far longer than the short timeout used for plain `sc.exe`
+    // queries - using the short one here reported a bogus "timed out (8
+    // seconds)" while the user was still looking at the prompt.
+    let result = run_command_with_deadline(
         Command::new("powershell.exe").args(["-NoProfile", "-Command", &ps_cmd]),
         description,
+        ELEVATION_TIMEOUT,
     );
     let _ = std::fs::remove_file(temp_bat);
     result
@@ -883,9 +1006,21 @@ fn set_service_flag<R: Runtime>(app: &tauri::AppHandle<R>, installed: bool) {
 /// The app itself runs un-elevated, so the sc.exe calls are relaunched
 /// through an elevated helper (which shows a UAC prompt).
 #[tauri::command]
-fn install_service<R: Runtime>(app: tauri::AppHandle<R>) -> Result<String, String> {
+async fn install_service<R: Runtime>(app: tauri::AppHandle<R>) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || install_service_blocking(app))
+        .await
+        .map_err(|e| format!("service install task failed: {e}"))?
+}
+
+fn install_service_blocking<R: Runtime>(app: tauri::AppHandle<R>) -> Result<String, String> {
     let svc_path = service_exe_path()?;
     let rules_dir = rules_dir_string(&app)?;
+
+    // The bridge pipe name is derived from the shared token, so the token
+    // must exist before the service starts - otherwise the service comes up
+    // without a bridge and the GUI falls back to a UAC prompt for every
+    // privileged change.
+    bridge_token(&app)?;
 
     // sc.exe needs the full command line as the binPath value; the inner
     // double quotes must be escaped, otherwise install paths containing
@@ -906,15 +1041,18 @@ fn install_service<R: Runtime>(app: tauri::AppHandle<R>) -> Result<String, Strin
     std::fs::write(&temp_bat, bat_content)
         .map_err(|e| format!("failed to create temp script: {}", e))?;
 
-    // Run via PowerShell with elevation
+    // Run via PowerShell with elevation. The UAC prompt can stay open for as
+    // long as the user needs, so this must use the elevation deadline and not
+    // the short one used for plain `sc.exe` queries.
     let escaped_bat_path = temp_bat.display().to_string().replace('\'', "''");
     let ps_cmd = format!(
         "$p = Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', '{}' -Verb RunAs -Wait -PassThru; exit $p.ExitCode",
         escaped_bat_path
     );
-    let output = run_command_with_timeout(
+    let output = run_command_with_deadline(
         Command::new("powershell.exe").args(["-NoProfile", "-Command", &ps_cmd]),
         "elevated service install",
+        ELEVATION_TIMEOUT,
     )?;
 
     let script_output = std::fs::read(&temp_log)
@@ -963,16 +1101,24 @@ fn install_service<R: Runtime>(app: tauri::AppHandle<R>) -> Result<String, Strin
     // previous version's uninstaller has removed it.
     set_service_flag(&app, true);
 
+    // Do not promise "no need to keep the app open" here: that is true for
+    // rule enforcement, but ProBalance / Game Mode need the GUI to relay the
+    // foreground window from the interactive session (issue #34).
     Ok(
-        "service installed and started. It will auto-run on boot; no need to keep the app open."
-            .to_string(),
+        "service installed and started. It will auto-run on boot and keep applying rules with the app closed.".to_string(),
     )
 }
 
 /// Uninstall the cpum_service. The sc.exe calls are relaunched elevated when
 /// the un-elevated attempt is refused with access denied.
 #[tauri::command]
-fn uninstall_service<R: Runtime>(app: tauri::AppHandle<R>) -> Result<String, String> {
+async fn uninstall_service<R: Runtime>(app: tauri::AppHandle<R>) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || uninstall_service_blocking(app))
+        .await
+        .map_err(|e| format!("service uninstall task failed: {e}"))?
+}
+
+fn uninstall_service_blocking<R: Runtime>(app: tauri::AppHandle<R>) -> Result<String, String> {
     if query_service_status()? == "not_installed" {
         set_service_flag(&app, false);
         return Ok("service is not installed, nothing to uninstall.".to_string());
@@ -1035,13 +1181,20 @@ fn uninstall_service<R: Runtime>(app: tauri::AppHandle<R>) -> Result<String, Str
 /// Returns "connected" or "unavailable"; when connected, operations on
 /// protected / other-session processes work without any UAC prompt.
 #[tauri::command]
-fn get_bridge_status<R: Runtime>(app: tauri::AppHandle<R>) -> String {
-    let Ok(token) = bridge_token(&app) else {
-        return "unavailable".to_string();
-    };
-    match cpum_core::ipc::request(&cpum_core::ipc::Request::Ping { token }) {
-        Ok(response) if response.ok => "connected".to_string(),
-        _ => "unavailable".to_string(),
+async fn get_bridge_status<R: Runtime>(app: tauri::AppHandle<R>) -> String {
+    match tauri::async_runtime::spawn_blocking(move || {
+        let Ok(token) = bridge_token(&app) else {
+            return "unavailable".to_string();
+        };
+        match cpum_core::ipc::request(&cpum_core::ipc::Request::Ping { token }) {
+            Ok(response) if response.ok => "connected".to_string(),
+            _ => "unavailable".to_string(),
+        }
+    })
+    .await
+    {
+        Ok(status) => status,
+        Err(_) => "unavailable".to_string(),
     }
 }
 
@@ -1092,8 +1245,18 @@ fn query_service_status() -> Result<String, String> {
 }
 
 /// Start the service (when installed but stopped).
+///
+/// The elevated fallback waits for the UAC prompt, so the command runs on a
+/// blocking worker: a synchronous body would freeze the window for as long
+/// as the prompt stays open.
 #[tauri::command]
-fn start_service() -> Result<String, String> {
+async fn start_service() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(start_service_blocking)
+        .await
+        .map_err(|e| format!("service start task failed: {e}"))?
+}
+
+fn start_service_blocking() -> Result<String, String> {
     if query_service_status()? == "not_installed" {
         return Err("service is not installed, please install it first.".to_string());
     }
@@ -1119,7 +1282,13 @@ fn start_service() -> Result<String, String> {
 
 /// Stop the service.
 #[tauri::command]
-fn stop_service() -> Result<String, String> {
+async fn stop_service() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(stop_service_blocking)
+        .await
+        .map_err(|e| format!("service stop task failed: {e}"))?
+}
+
+fn stop_service_blocking() -> Result<String, String> {
     if query_service_status()? == "not_installed" {
         return Err("service is not installed, please install it first.".to_string());
     }
@@ -1146,7 +1315,6 @@ fn stop_service() -> Result<String, String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
         // Updater plugin: serves the embedded `plugins.updater` config
         // (pubkey + endpoints) to the frontend, which uses
         // `@tauri-apps/plugin-updater` to check and apply releases. Build-time
@@ -1184,6 +1352,13 @@ pub fn run() {
             start_service,
             stop_service,
         ])
+        .setup(|app| {
+            // The GUI is the only process in the interactive session, so it is
+            // the only one that can observe the foreground window for the
+            // Session 0 service (see start_foreground_reporter).
+            start_foreground_reporter(app.handle().clone());
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

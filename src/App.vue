@@ -462,7 +462,7 @@ async function doInstallService() {
     await refreshServiceStatus();
     showSnack(msg, "success");
   } catch (e: any) {
-    serviceMessage.value = `${e}`;
+    serviceMessage.value = t("installFailed", { error: String(e) });
     showSnack(t("installFailed", { error: String(e) }), "error");
   } finally {
     serviceLoading.value = false;
@@ -478,7 +478,7 @@ async function doUninstallService() {
     await refreshServiceStatus();
     showSnack(msg, "success");
   } catch (e: any) {
-    serviceMessage.value = `${e}`;
+    serviceMessage.value = t("uninstallFailed", { error: String(e) });
     showSnack(t("uninstallFailed", { error: String(e) }), "error");
   } finally {
     serviceLoading.value = false;

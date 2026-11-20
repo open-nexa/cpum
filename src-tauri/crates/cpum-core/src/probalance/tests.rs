@@ -587,3 +587,64 @@ fn pair_orphans_detects_unpaired_downgrades() {
     let bad = vec![entry(9, "downgrade", 50, "e.exe", None)];
     assert!(pair_orphans(&bad).is_empty());
 }
+
+/// Regression: a game-mode boost that was never undone (abnormal
+/// termination) must be reconciled at startup - otherwise the foreground
+/// process stays at `ABOVE_NORMAL` forever, which is exactly the leak the
+/// orphan reconciliation exists to prevent.
+#[test]
+fn pair_orphans_detects_unpaired_game_mode_boosts() {
+    let entry =
+        |ts: u64, action: &str, pid: u32, name: &str, from: Option<ProcessPriorities>| PbLogEntry {
+            ts,
+            action: action.into(),
+            reason: None,
+            pid,
+            name: name.into(),
+            cpu: None,
+            from,
+            to: None,
+        };
+    let entries = vec![
+        entry(1, "game_mode_boost", 70, "game.exe", Some(prios(0x20, 2))), // orphan
+        entry(2, "game_mode_boost", 80, "game2.exe", Some(prios(0x20, 2))), // restored
+        entry(3, "game_mode_restore", 80, "game2.exe", None),
+    ];
+    let orphans = pair_orphans(&entries);
+    assert_eq!(orphans.len(), 1, "only PID 70 is an orphan");
+    let (name, restored) = orphans.get(&70).unwrap();
+    assert_eq!(name, "game.exe");
+    assert_eq!(restored.priority_class, Some(0x20));
+    assert!(
+        restored.io_priority.is_none(),
+        "the boost only changed the CPU priority class - the IO priority must not be written back"
+    );
+}
+
+/// A boost must not overwrite a pending downgrade orphan: the downgrade's
+/// original value is the one that has to come back.
+#[test]
+fn a_boost_does_not_overwrite_a_pending_downgrade_orphan() {
+    let entry =
+        |ts: u64, action: &str, pid: u32, name: &str, from: Option<ProcessPriorities>| PbLogEntry {
+            ts,
+            action: action.into(),
+            reason: None,
+            pid,
+            name: name.into(),
+            cpu: None,
+            from,
+            to: None,
+        };
+    let entries = vec![
+        entry(1, "downgrade", 90, "both.exe", Some(prios(0x20, 2))),
+        entry(2, "game_mode_boost", 90, "both.exe", Some(prios(0x4000, 2))),
+    ];
+    let orphans = pair_orphans(&entries);
+    let (_, restored) = orphans.get(&90).unwrap();
+    assert_eq!(
+        restored.priority_class,
+        Some(0x20),
+        "the pre-downgrade original must win over the boost's intermediate value"
+    );
+}

@@ -1,27 +1,29 @@
 //! Lightweight monitor: process CPU differential sampling + foreground
-//! process identification.
+//! window observation.
 //!
-//! The "eyes" of the dynamic optimization engine (ProBalance) - used
-//! service-side only, no dependency on the GUI's metrics stream:
 //!  - [`CpuSampler`]: ToolHelp enumeration + GetProcessTimes differential
-//!    -> per-process CPU% (single-core baseline)
-//!  - [`get_foreground_pid`]: foreground window -> PID (cross-session
-//!    desktop switch trick, see the function's comments)
+//!    -> per-process CPU% (single-core baseline), used by the service-side
+//!    ProBalance runtime.
+//!  - [`get_foreground_state`]: foreground window -> PID + fullscreen state.
+//!    These Win32 APIs are **session-local**: they describe the interactive
+//!    desktop of the calling thread. A `LocalSystem` service lives in
+//!    Session 0, has no interactive windows, and can therefore never observe
+//!    the user's foreground window. The GUI, which runs in the interactive
+//!    session, samples them once per second and relays the result to the
+//!    service over the IPC bridge - see [`crate::ipc::ForegroundCache`].
+//!    A foreground *observation* is thus never taken by the service itself.
 
 use std::collections::HashMap;
 use std::mem::size_of;
 use std::time::Instant;
 
+use serde::{Deserialize, Serialize};
 use windows::Win32::Foundation::{CloseHandle, FILETIME};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
-use windows::Win32::System::StationsAndDesktops::{
-    CloseDesktop, GetThreadDesktop, OpenInputDesktop, SetThreadDesktop, DESKTOP_CONTROL_FLAGS,
-    DESKTOP_READOBJECTS,
-};
 use windows::Win32::System::Threading::{
-    GetCurrentThreadId, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Shell::{SHQueryUserNotificationState, QUNS_RUNNING_D3D_FULL_SCREEN};
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
@@ -29,6 +31,27 @@ use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThre
 // =========================================================================
 // Process CPU differential sampling
 // =========================================================================
+
+/// Convert a CPU-time delta into a single-core-baseline CPU percentage.
+///
+/// `GetProcessTimes` reports CPU time in **100-nanosecond units**, so the raw
+/// tick delta has to be scaled to seconds before it is divided by the
+/// wall-clock delta. Skipping that conversion inflates the result by 1e7: a
+/// fully busy core would read 1e9 % instead of 100 %.
+///
+/// This lives here (rather than inline in each sampler) because the GUI's
+/// metrics stream and the service-side ProBalance sampler both need it, and
+/// the two must agree on the scale - the ProBalance thresholds
+/// (`fg_cpu_threshold` = 100 = one full core) are meaningless otherwise.
+pub fn cpu_percent_from_ticks(delta_ticks: u64, wall_secs: f64) -> f32 {
+    // A non-finite or non-positive interval cannot produce a meaningful
+    // percentage (and would poison the thresholds with NaN).
+    if !wall_secs.is_finite() || wall_secs <= 0.0 {
+        return 0.0;
+    }
+    let delta_cpu_sec = delta_ticks as f64 * 1e-7;
+    ((delta_cpu_sec / wall_secs) * 100.0) as f32
+}
 
 /// One process's sample result.
 pub struct ProcSample {
@@ -104,12 +127,12 @@ impl CpuSampler {
                         let prev = self.last.get(&pid).copied();
                         current.insert(pid, total);
                         // Single-core baseline CPU%: process CPU time delta
-                        // / wall-clock delta x 100.
-                        let cpu_percent = match (prev, wall_secs > 0.0) {
-                            (Some(p), true) => {
-                                (total.saturating_sub(p) as f64 / wall_secs * 100.0) as f32
-                            }
-                            _ => 0.0,
+                        // / wall-clock delta x 100. The delta is in 100-ns
+                        // units and has to be scaled to seconds first - see
+                        // `cpu_percent_from_ticks`.
+                        let cpu_percent = match prev {
+                            Some(p) => cpu_percent_from_ticks(total.saturating_sub(p), wall_secs),
+                            None => 0.0,
                         };
                         let name_len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(0);
                         let name = String::from_utf16_lossy(&entry.szExeFile[..name_len]);
@@ -188,60 +211,60 @@ fn ft_to_u64(ft: FILETIME) -> u64 {
 // Foreground process identification
 // =========================================================================
 
-/// Current foreground process PID (None if it cannot be determined).
-///
-/// The service runs in session 0, so calling `GetForegroundWindow` directly
-/// only sees its own session's desktop (which has no interactive windows).
-/// The standard trick: first switch the thread to the **input desktop**
-/// (`OpenInputDesktop`; a LocalSystem service can open the active console
-/// session's input desktop), then read the foreground window, then switch
-/// back. On failure (lock screen / no interactive session / security
-/// policy) it returns None - the engine treats this as "no foreground"
-/// and does not trigger contention, gracefully degrading behavior.
+/// Foreground window observation, serialized over the GUI -> service bridge.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ForegroundState {
+    /// PID owning the foreground window; `None` when there is no foreground
+    /// window (lock screen, no interactive session, API failure).
     pub pid: Option<u32>,
+    /// Whether the user is presenting a fullscreen Direct3D application.
     pub fullscreen: bool,
 }
 
-/// Read the foreground process and fullscreen presentation state from the
-/// active input desktop. The latter is intentionally false on any API or
-/// session-boundary failure: Game Mode must never activate on a guess.
+/// A foreground observation plus whether it is still fresh.
+///
+/// ProBalance must never act on a stale PID (the app may have exited, or a
+/// completely different window may now be in front), so `fresh = false` means
+/// "no foreground information" and the engine degrades to idle.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ForegroundSnapshot {
+    pub state: ForegroundState,
+    pub fresh: bool,
+}
+
+/// Read the foreground process and fullscreen presentation state on the
+/// **calling thread's** input desktop.
+///
+/// `GetForegroundWindow` and `SHQueryUserNotificationState` are session-local:
+/// they describe the desktop of the thread that calls them. This function must
+/// therefore run in the interactive session - i.e. in the GUI (or a helper
+/// process started in that session). A `LocalSystem` service runs in Session 0
+/// and cannot observe the user's foreground window; the GUI relays this result
+/// to the service via `ipc::Request::ReportForeground` instead.
+///
+/// There is deliberately no `OpenInputDesktop` / `SetThreadDesktop` here.
+/// That "session switch trick" could not bridge Session 0 -> Session 1 in the
+/// first place, and a thread that already owns windows cannot switch desktops
+/// (`ERROR_BUSY`), so it returned `None` even inside the interactive session.
+/// Reading the foreground window directly is both correct and cheaper.
 pub fn get_foreground_state() -> ForegroundState {
     unsafe {
-        let Ok(desktop) = OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_READOBJECTS)
-        else {
-            return ForegroundState {
-                pid: None,
-                fullscreen: false,
-            };
-        };
-        let old = GetThreadDesktop(GetCurrentThreadId()).ok();
-        let switched = SetThreadDesktop(desktop).is_ok();
-        let pid = if switched {
-            let hwnd = GetForegroundWindow();
-            if hwnd.0.is_null() {
-                None
-            } else {
-                let mut pid = 0u32;
-                if GetWindowThreadProcessId(hwnd, Some(&mut pid)) != 0 && pid != 0 {
-                    Some(pid)
-                } else {
-                    None
-                }
-            }
-        } else {
+        let hwnd = GetForegroundWindow();
+        let pid = if hwnd.0.is_null() {
             None
-        };
-        let fullscreen = switched
-            && SHQueryUserNotificationState()
-                .map(|state| state == QUNS_RUNNING_D3D_FULL_SCREEN)
-                .unwrap_or(false);
-        if switched {
-            if let Some(old) = old {
-                let _ = SetThreadDesktop(old);
+        } else {
+            let mut pid = 0u32;
+            if GetWindowThreadProcessId(hwnd, Some(&mut pid)) != 0 && pid != 0 {
+                Some(pid)
+            } else {
+                None
             }
-        }
-        let _ = CloseDesktop(desktop);
+        };
+        // Any API failure means "not fullscreen": Game Mode must never
+        // activate on a guess.
+        let fullscreen = SHQueryUserNotificationState()
+            .map(|state| state == QUNS_RUNNING_D3D_FULL_SCREEN)
+            .unwrap_or(false);
         ForegroundState { pid, fullscreen }
     }
 }
@@ -249,4 +272,34 @@ pub fn get_foreground_state() -> ForegroundState {
 /// Current foreground process PID (None if it cannot be determined).
 pub fn get_foreground_pid() -> Option<u32> {
     get_foreground_state().pid
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cpu_percent_from_ticks;
+
+    /// Regression: `GetProcessTimes` reports 100-ns units. A process that
+    /// consumed one full core over one second must read 100 %, not 1e9 %.
+    #[test]
+    fn one_full_core_reads_one_hundred_percent() {
+        let one_second_in_ticks: u64 = 10_000_000; // 1e7 * 1e-7 s
+        let value = cpu_percent_from_ticks(one_second_in_ticks, 1.0);
+        assert!((value - 100.0).abs() < 0.01, "expected 100.0, got {value}");
+    }
+
+    /// The same core spread over two wall-clock seconds is 50 %.
+    #[test]
+    fn half_a_core_reads_fifty_percent() {
+        let one_second_in_ticks: u64 = 10_000_000;
+        let value = cpu_percent_from_ticks(one_second_in_ticks, 2.0);
+        assert!((value - 50.0).abs() < 0.01, "expected 50.0, got {value}");
+    }
+
+    /// A process that did nothing must read 0 %, and a zero-length interval
+    /// must not produce NaN or infinity (it would poison the thresholds).
+    #[test]
+    fn idle_and_zero_interval_are_zero() {
+        assert_eq!(cpu_percent_from_ticks(0, 1.0), 0.0);
+        assert_eq!(cpu_percent_from_ticks(1_000_000, 0.0), 0.0);
+    }
 }

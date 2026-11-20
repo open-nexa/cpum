@@ -46,7 +46,6 @@ winres = "0.1"
 [dependencies]
 cpum-core = { path = "crates/cpum-core" }
 tauri = { version = "2", features = [] }
-tauri-plugin-opener = "2"
 tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

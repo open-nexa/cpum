@@ -130,15 +130,30 @@ pub fn valid_memory_priority(mp: u32) -> bool {
     (1..=5).contains(&mp)
 }
 
+/// The rule's per-group affinity masks.
+///
+/// The explicit `group_masks` list (one entry per processor group) when
+/// present, otherwise the single legacy `mask`, which belongs to group 0.
+///
+/// This is the single place that turns a rule into masks; validation and the
+/// application engine both go through it, so they cannot disagree about what
+/// a rule means.
+pub fn rule_group_masks(rule: &AffinityRule) -> Result<Vec<u64>, String> {
+    match &rule.group_masks {
+        Some(values) => crate::procwin::GroupMasks::from_hex_list(values)
+            .map(|masks| masks.0)
+            .map_err(|e| format!("invalid mask for rule {}: {}", rule.process_name, e)),
+        None => crate::procwin::parse_hex_mask(&rule.mask)
+            .map(|mask| vec![mask])
+            .map_err(|e| format!("invalid mask for rule {}: {}", rule.process_name, e)),
+    }
+}
+
 /// Validate a rule's fields (mask is parseable and non-zero, priority
 /// values are legal). Mask parsing delegates to
 /// [`crate::procwin::parse_hex_mask`].
 pub fn validate_rule(rule: &AffinityRule) -> Result<(), String> {
-    let masks = match &rule.group_masks {
-        Some(values) => crate::procwin::GroupMasks::from_hex_list(values)?.0,
-        None => vec![crate::procwin::parse_hex_mask(&rule.mask)
-            .map_err(|e| format!("invalid mask for rule {}: {}", rule.process_name, e))?],
-    };
+    let masks = rule_group_masks(rule)?;
     if masks.iter().all(|mask| *mask == 0) {
         return Err(format!(
             "rule {} must select at least one logical processor",

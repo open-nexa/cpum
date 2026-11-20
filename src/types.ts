@@ -455,6 +455,8 @@ export interface PbStatus {
   fg_pid: number | null;
   fg_cpu_percent: number | null;
   game_mode_active: boolean;
+  /** Whether a fresh foreground observation was relayed by the app this tick (false = ProBalance paused, app not running) */
+  foreground_signal: boolean;
 }
 
 /** A single ProBalance action log entry (downgrade / restore / exit) */

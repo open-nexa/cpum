@@ -373,7 +373,7 @@ async function apply() {
     }
     emit("update:modelValue", false);
   } catch (e) {
-    errorMsg.value = e instanceof Error ? e.message : String(e);
+    errorMsg.value = t("affinityApplyFailed", { error: String(e) });
   } finally {
     applying.value = false;
   }

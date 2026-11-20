@@ -20,6 +20,14 @@
 //! form a "protected list"; matching processes are skipped by ProBalance to
 //! avoid the two engines clobbering each other's priority settings.
 //!
+//! Foreground detection is the one thing this daemon cannot do itself: it runs
+//! in Session 0, while `GetForegroundWindow` / `SHQueryUserNotificationState`
+//! describe the calling thread's interactive desktop (Session 1). The GUI
+//! samples those APIs once per second and relays the result over the bridge;
+//! a TTL-bounded cache feeds each ProBalance tick. When the app is closed the
+//! report expires and the engine deliberately stays idle instead of acting on
+//! a stale PID (issue #34).
+//!
 //! This crate is intentionally separate from the main `cpum` GUI crate so
 //! that `tauri_build::try_build` does not run its build script (and therefore
 //! does not validate the bundled `cpum_service.exe` resource) when only the
@@ -74,10 +82,16 @@ fn run_service(rules_dir: std::path::PathBuf) -> WinSvcResult<()> {
     cpum_core::procwin::enable_debug_privilege()
         .map_err(|message| windows_service::Error::Winapi(std::io::Error::other(message)))?;
 
+    // The GUI owns the interactive session, so it relays foreground-window
+    // observations to us over the bridge. The cache is shared by the listener
+    // thread and the ProBalance tick below.
+    let foreground = cpum_core::ipc::new_foreground_cache();
+
     // Serve privileged requests from the (un-elevated) GUI. The listener blocks
     // on a background thread and dies with the process when the service stops.
     let bridge_dir = rules_dir.clone();
-    std::thread::spawn(move || cpum_core::ipc::serve(bridge_dir));
+    let bridge_foreground = foreground.clone();
+    std::thread::spawn(move || cpum_core::ipc::serve(bridge_dir, bridge_foreground));
 
     let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
 
@@ -135,7 +149,13 @@ fn run_service(rules_dir: std::path::PathBuf) -> WinSvcResult<()> {
             }
         }
 
-        pb.tick(&rules_dir, &mut sampler, &protecting_rules);
+        // A missing / expired GUI report means "no foreground known"; the
+        // runtime stays idle rather than acting on a PID from a closed app.
+        let fg = foreground
+            .lock()
+            .map(|cache| cache.snapshot())
+            .unwrap_or_default();
+        pb.tick(&rules_dir, &mut sampler, &protecting_rules, fg);
 
         tick_count = tick_count.wrapping_add(1);
         if shutdown_rx
@@ -212,13 +232,38 @@ fn one_shot_set_priority(args: &[String]) -> Result<String, String> {
         args.get(index)
             .and_then(|value| value.trim().parse::<u32>().ok())
     };
-    if let Some(value) = parse(3) {
+    let priority_class = parse(3);
+    let io_priority = parse(4);
+    let memory_priority = parse(5);
+    // Validate against the same ranges the rule model uses: the Win32 calls
+    // accept whatever they are handed (the undocumented IO priority in
+    // particular), so an out-of-range value would silently reach the kernel.
+    if let Some(pc) = priority_class {
+        if !cpum_core::rule::valid_priority_class(pc) {
+            return Err(format!("invalid CPU priority class: 0x{pc:X}"));
+        }
+    }
+    if let Some(io) = io_priority {
+        if !cpum_core::rule::valid_io_priority(io) {
+            return Err(format!(
+                "invalid IO priority: {io} (allowed: 0=Very Low, 1=Low, 2=Normal)"
+            ));
+        }
+    }
+    if let Some(mp) = memory_priority {
+        if !cpum_core::rule::valid_memory_priority(mp) {
+            return Err(format!(
+                "invalid memory priority: {mp} (allowed 1=Very Low ... 5=Normal)"
+            ));
+        }
+    }
+    if let Some(value) = priority_class {
         cpum_core::procwin::set_process_priority_class(pid, value)?;
     }
-    if let Some(value) = parse(4) {
+    if let Some(value) = io_priority {
         cpum_core::procwin::set_process_io_priority(pid, value)?;
     }
-    if let Some(value) = parse(5) {
+    if let Some(value) = memory_priority {
         cpum_core::procwin::set_process_memory_priority(pid, value)?;
     }
     Ok(format!("priorities applied to PID {pid}"))
