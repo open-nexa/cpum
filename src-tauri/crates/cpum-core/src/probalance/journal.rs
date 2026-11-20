@@ -141,6 +141,12 @@ pub fn read_log(base_dir: &Path, limit: usize) -> Vec<PbLogEntry> {
 /// removes - so multiple "downgrade -> restore" rounds on the same PID
 /// only register as an orphan if the last round is unpaired. Used by the
 /// service startup reconciliation.
+///
+/// A `game_mode_boost` is an orphan source too: it raises the foreground
+/// process to `ABOVE_NORMAL`, and an abnormal termination leaves it there
+/// forever - the same class of leak the orphan reconciliation exists to
+/// prevent. Only the CPU priority class was changed by the boost, so only
+/// that field is restored.
 pub(super) fn pair_orphans(entries: &[PbLogEntry]) -> HashMap<u32, (String, ProcessPriorities)> {
     let mut orphans: HashMap<u32, (String, ProcessPriorities)> = HashMap::new();
     for e in entries {
@@ -150,7 +156,24 @@ pub(super) fn pair_orphans(entries: &[PbLogEntry]) -> HashMap<u32, (String, Proc
                     orphans.insert(e.pid, (e.name.clone(), from));
                 }
             }
-            "restore" | "exit" => {
+            "game_mode_boost" => {
+                if let Some(from) = e.from {
+                    // Do not overwrite a pending downgrade orphan: its value
+                    // is the original from before the downgrade, which is
+                    // the one that has to come back.
+                    orphans.entry(e.pid).or_insert_with(|| {
+                        (
+                            e.name.clone(),
+                            ProcessPriorities {
+                                priority_class: from.priority_class,
+                                io_priority: None,
+                                memory_priority: None,
+                            },
+                        )
+                    });
+                }
+            }
+            "restore" | "exit" | "game_mode_restore" => {
                 orphans.remove(&e.pid);
             }
             _ => {}
@@ -178,6 +201,12 @@ pub struct PbStatus {
     pub fg_cpu_percent: Option<f32>,
     #[serde(default)]
     pub game_mode_active: bool,
+    /// Whether a fresh foreground observation was relayed by the GUI this
+    /// tick. `false` explains a permanently `null` `fg_pid` while the service
+    /// is online: the app (which owns the interactive session) is not running.
+    /// Optional so status files written by older services still deserialize.
+    #[serde(default)]
+    pub foreground_signal: bool,
 }
 
 pub fn write_status(base_dir: &Path, status: &PbStatus) -> Result<(), String> {

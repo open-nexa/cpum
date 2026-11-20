@@ -26,6 +26,17 @@ const errorMsg = ref<string | null>(null);
  *  immediately write the just-loaded data back to the backend). */
 const configLoaded = ref(false);
 
+/** The config exactly as it was loaded (or last saved). The deep watcher compares
+ *  against it: the load-induced assignment reaches the watcher *after*
+ *  `configLoaded` is already true, so the guard alone cannot tell "the user
+ *  changed something" from "the panel was opened". */
+let loadedSnapshot: string | null = null;
+
+/** Stable string form of a config, used for the snapshot comparison. */
+function configSnapshot(c: ProBalanceConfig | null): string {
+  return c ? JSON.stringify(c) : "";
+}
+
 // Polling is driven from outside: `App.vue` owns the single 1 s ticker and calls
 // the exposed `poll()` every second tick. This panel used to own a 2 s interval,
 // which drifted against the core-usage poll and put two IPC bursts in the same
@@ -102,7 +113,10 @@ const showStatusDetails = computed(
   () =>
     (status.value?.engaged && status.value.downgraded > 0) ||
     (serviceOnline.value && status.value?.fg_pid) ||
-    !!status.value?.game_mode_active,
+    !!status.value?.game_mode_active ||
+    // The service cannot see the interactive desktop; when the app stops
+    // relaying foreground state, tell the user instead of looking broken.
+    (serviceOnline.value && !!status.value?.enabled && !status.value?.foreground_signal),
 );
 
 // ---------- Log display helpers ----------
@@ -172,6 +186,14 @@ async function loadConfig() {
   loading.value = true;
   try {
     config.value = await getProBalanceConfig();
+    // Remember what was loaded: the assignment above queues the deep
+    // watcher, and that watcher runs *after* this function returns - at
+    // which point `configLoaded` is already true. The guard alone
+    // therefore cannot suppress the save, and merely opening the panel
+    // would write the config back. The snapshot comparison below is what
+    // actually distinguishes "the user changed something" from "the panel
+    // was opened".
+    loadedSnapshot = configSnapshot(config.value);
     configLoaded.value = true;
     errorMsg.value = null;
   } catch (e) {
@@ -215,6 +237,9 @@ async function save() {
   }
   try {
     await saveProBalanceConfig(config.value);
+    // The config on disk now matches what is on screen - a later watcher
+    // run must not treat the current state as "changed" again.
+    loadedSnapshot = configSnapshot(config.value);
     errorMsg.value = null;
   } catch (e) {
     errorMsg.value = t("pbSaveFailed", { error: String(e) });
@@ -243,12 +268,16 @@ function flushPendingSave() {
 }
 
 // Watch every config field; deep: true because threshold values are nested
-// inside the `config` ref. The `configLoaded` guard suppresses the assignment
-// from `loadConfig`, which would otherwise re-save the just-loaded data.
+// inside the `config` ref. The `configLoaded` guard suppresses the watcher
+// before the first load, and the snapshot comparison suppresses the
+// assignment from `loadConfig` - which would otherwise re-save the
+// just-loaded data.
 watch(
   config,
   () => {
     if (!configLoaded.value) return;
+    // The user changed nothing: this is the assignment from `loadConfig`.
+    if (loadedSnapshot !== null && configSnapshot(config.value) === loadedSnapshot) return;
     scheduleAutoSave();
   },
   { deep: true },
@@ -286,6 +315,7 @@ watch(
       // Reset the loaded-flag for the new session so the loadConfig assignment
       // doesn't re-trigger a save.
       configLoaded.value = false;
+      loadedSnapshot = null;
       loadConfig();
       startPolling();
     } else {
@@ -298,6 +328,7 @@ watch(
 onMounted(() => {
   if (props.modelValue) {
     configLoaded.value = false;
+    loadedSnapshot = null;
     loadConfig();
     startPolling();
   }
@@ -357,6 +388,9 @@ onUnmounted(stopPolling);
         </span>
         <span v-if="serviceOnline && status?.fg_pid">
           {{ t('pbFgInfo', { pid: status.fg_pid, cpu: (status.fg_cpu_percent ?? 0).toFixed(0) }) }}
+        </span>
+        <span v-if="serviceOnline && status?.enabled && !status?.foreground_signal" class="text-warning">
+          {{ t('pbForegroundWaiting') }}
         </span>
         <v-spacer />
         <v-chip v-if="status?.game_mode_active" color="primary" size="x-small" variant="tonal">

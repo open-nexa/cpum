@@ -9,8 +9,8 @@
 //! don't interfere with each other).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering, Ordering::Relaxed};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
@@ -144,11 +144,10 @@ pub fn collect_metrics_tick() -> Result<MetricsTick, String> {
                 None => (0, 0),
             };
             let cpu_percent = match prev {
-                Some(p) => {
-                    let delta = snap.cpu_total_ticks.saturating_sub(p.cpu_total_ticks) as f64;
-                    let delta_cpu_sec = delta * 1e-7;
-                    ((delta_cpu_sec / dt_sec) * 100.0) as f32
-                }
+                Some(p) => cpum_core::monitor::cpu_percent_from_ticks(
+                    snap.cpu_total_ticks.saturating_sub(p.cpu_total_ticks),
+                    dt_sec,
+                ),
                 None => 0.0,
             };
             let cpu_percent = cpu_percent.max(0.0).min(nproc * 100.0 * 1.1);
@@ -324,18 +323,27 @@ pub fn build_wave_events(tick: &MetricsTick) -> (Vec<MetricsWaveEvent>, ProcessD
 // =========================================================================
 
 static STREAM_RUNNING: AtomicBool = AtomicBool::new(false);
+/// The producer thread's own stop flag.
+///
+/// A single global flag cannot express "stop *this* thread": after a
+/// stop -> start sequence the global flag is true again, so a thread that
+/// was still winding down would see it and keep running - leaving two
+/// producers that emit the same waves and overwrite the shared sampling
+/// baseline (halved, garbled rates).
+static STREAM_STOP: Lazy<Mutex<Option<Arc<AtomicBool>>>> = Lazy::new(|| Mutex::new(None));
 static STREAM_JOIN_HANDLE: Lazy<Mutex<Option<JoinHandle<()>>>> = Lazy::new(|| Mutex::new(None));
 
 pub fn start_metrics_stream_in_thread<EmitFn>(interval_ms: u32, emit: EmitFn) -> Result<(), String>
 where
     EmitFn: Fn(&str, serde_json::Value) -> Result<(), String> + Send + 'static,
 {
-    if STREAM_RUNNING.load(Relaxed) {
+    if STREAM_RUNNING.swap(true, Ordering::SeqCst) {
         return Ok(());
     }
-    STREAM_RUNNING.store(true, Relaxed);
 
     let interval = std::time::Duration::from_millis(interval_ms.max(100) as u64);
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
 
     let handle = std::thread::Builder::new()
         .name("cpum-metrics-stream".into())
@@ -347,12 +355,12 @@ where
             let wave_gap = std::time::Duration::from_millis(5);
             let first_sleep = std::time::Duration::from_secs(1);
             let mut slept = std::time::Duration::ZERO;
-            while slept < first_sleep && STREAM_RUNNING.load(Relaxed) {
+            while slept < first_sleep && !thread_stop.load(Relaxed) {
                 std::thread::sleep(std::time::Duration::from_millis(50));
                 slept += std::time::Duration::from_millis(50);
             }
             loop {
-                if !STREAM_RUNNING.load(Relaxed) {
+                if thread_stop.load(Relaxed) {
                     break;
                 }
                 let round_start = Instant::now();
@@ -362,7 +370,7 @@ where
                         let (waves, diff) = build_wave_events(&tick);
 
                         for (i, w) in waves.iter().enumerate() {
-                            if !STREAM_RUNNING.load(Relaxed) {
+                            if thread_stop.load(Relaxed) {
                                 break;
                             }
                             let payload = match serde_json::to_value(w) {
@@ -379,7 +387,7 @@ where
 
                         // Diff last: processes that were added/removed
                         // need one round of metrics first, then sync.
-                        if STREAM_RUNNING.load(Relaxed) {
+                        if !thread_stop.load(Relaxed) {
                             if let Ok(payload) = serde_json::to_value(&diff) {
                                 let _ = emit("process://processes-diff", payload);
                             }
@@ -391,7 +399,7 @@ where
                     }
                 }
 
-                if !STREAM_RUNNING.load(Relaxed) {
+                if thread_stop.load(Relaxed) {
                     break;
                 }
                 // Ensure the interval is roughly interval_ms (sleep less
@@ -402,7 +410,7 @@ where
                     // on more quickly.
                     let step = std::time::Duration::from_millis(50);
                     let mut slept = std::time::Duration::ZERO;
-                    while slept < remaining && STREAM_RUNNING.load(Relaxed) {
+                    while slept < remaining && !thread_stop.load(Relaxed) {
                         std::thread::sleep(step.min(remaining - slept));
                         slept = slept.saturating_add(step);
                     }
@@ -411,21 +419,24 @@ where
         })
         .map_err(|e| e.to_string())?;
 
-    let mut guard = STREAM_JOIN_HANDLE.lock().map_err(|e| e.to_string())?;
-    if let Some(old) = guard.replace(handle) {
-        drop(old);
-    }
+    *STREAM_STOP.lock().map_err(|e| e.to_string())? = Some(stop);
+    *STREAM_JOIN_HANDLE.lock().map_err(|e| e.to_string())? = Some(handle);
     Ok(())
 }
 
 pub fn stop_metrics_stream_in_thread() -> Result<(), String> {
-    STREAM_RUNNING.store(false, Relaxed);
-    if let Some(handle) = STREAM_JOIN_HANDLE.lock().map_err(|e| e.to_string())?.take() {
-        // Wait at most 400 ms (the thread may be in a 50 ms fine-grained
-        // sleep).
-        let _ = std::thread::spawn(move || {
-            let _ = handle.join();
-        });
+    // Signal this producer to stop ...
+    if let Some(stop) = STREAM_STOP.lock().map_err(|e| e.to_string())?.take() {
+        stop.store(true, Ordering::Relaxed);
     }
+    // ... and wait for it. The thread checks the flag between the waves
+    // and in 50 ms sleep steps, so this returns quickly - and it makes
+    // sure a following start cannot end up with two producers running.
+    if let Some(handle) = STREAM_JOIN_HANDLE.lock().map_err(|e| e.to_string())?.take() {
+        let _ = handle.join();
+    }
+    // Only now report the stream as stopped: a start that arrives while
+    // the join is still running must not spawn a second producer.
+    STREAM_RUNNING.store(false, Ordering::SeqCst);
     Ok(())
 }

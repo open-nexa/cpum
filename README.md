@@ -29,7 +29,7 @@ CPU Manager is a Windows desktop application for inspecting CPU topology, browsi
 - Rule scheduling mode: **Strict** (hard `SetProcessAffinityMask`) or **Soft** (`SetProcessDefaultCpuSets`, Win10 1803+; the scheduler may temporarily drift the process to other cores under load).
 - Rules may also pin **CPU priority class**, **I/O priority**, and **memory priority**. ProBalance automatically excludes processes whose priorities are managed by a rule so the two engines do not fight.
 - ProBalance dynamic optimization: when the foreground process's CPU stays above a configurable threshold, background processes that exceed a CPU threshold are temporarily downgraded (priority class + I/O priority) and restored automatically once contention clears, the process exits, or the feature is disabled. The status, statistics, and JSONL journal are exposed in the GUI.
-- Install an optional `CpumAffinityService` Windows service that starts automatically and scans for matching processes every five seconds. The same service hosts the ProBalance runtime, and doubles as a **privileged bridge**: the un-elevated GUI delegates changes to protected processes to it over a named pipe, so no UAC prompt is needed.
+- Install an optional `CpumAffinityService` Windows service that starts automatically and scans for matching processes every five seconds. The same service hosts the ProBalance runtime, and doubles as a **privileged bridge**: the un-elevated GUI delegates changes to protected processes to it over a named pipe, so no UAC prompt is needed. Rule enforcement keeps working with the app closed; ProBalance and Game Mode need the app running, because only the interactive session can observe the foreground window (see [Windows service](#windows-service)).
 - Persist rules and ProBalance configuration in the per-user data directory `%APPDATA%\com.open-nexa.cpum\` (`affinity_rules.json`, `probalance.json`, journal/status files). Legacy locations (`%APPDATA%\com.eason.cpum`, `%ProgramData%\cpum`, `%APPDATA%\cpum`) are migrated on first run or install.
 
 ## Screens and workflow
@@ -38,7 +38,7 @@ CPU Manager is a Windows desktop application for inspecting CPU topology, browsi
 2. Open the **Process** tab to set a single process's affinity and priorities immediately, or switch to the **Rules** tab to save a reusable rule.
 3. Use **Apply Rules** to apply every enabled rule to currently running matching processes.
 4. Use the **ProBalance** tab to configure foreground contention thresholds, allowlists, and view the live status / log.
-5. Install the Windows service from the application if rules and ProBalance should also be enforced after sign-in or reboot.
+5. Install the Windows service from the application if rules should also be enforced after sign-in or reboot. ProBalance and Game Mode additionally need the app itself running, since the service cannot observe the foreground window from Session 0.
 
 Changing affinity can affect responsiveness and throughput. Test masks carefully, especially on hybrid CPUs or machines running latency-sensitive workloads. ProBalance downgrades priorities only; it never kills or hard-pins background processes.
 
@@ -205,6 +205,8 @@ The on-disk format:
 
 The application can install, start, stop, and uninstall the `CpumAffinityService` service. The service runs as `LocalSystem`, starts automatically, receives the rule directory (`%APPDATA%\com.open-nexa.cpum`) when installed, and hosts both the rule engine and the ProBalance runtime. It attempts to enable `SeDebugPrivilege` so it can apply rules to processes in user sessions.
 
+**Why ProBalance and Game Mode need the app running.** The service runs in Session 0, where `GetForegroundWindow` and `SHQueryUserNotificationState` describe only that session's (empty) desktop — they cannot see the interactive session's foreground window. The GUI samples them once per second and relays the observation to the service over the same authenticated named pipe; the service remains the privileged executor that applies the downgrades and priority boosts. A report older than four seconds is discarded, so with the app closed `probalance_status.json` shows `foreground_signal: false` / `fg_pid: null` and the engine stays idle instead of acting on a stale PID. Rule enforcement is unaffected and continues in the background with no app open.
+
 Elevation is scoped to this action: the app calls `sc.exe` through an elevated helper, so installing or removing the service shows one UAC prompt while the rest of the app keeps running un-elevated.
 
 To verify an installation from a PowerShell prompt:
@@ -285,6 +287,7 @@ build.bat                         NSIS release build script
 - Network I/O counters require Win11 24H2+ (NtQueryInformationProcess / `ProcessNetworkIoCounters`); on older Windows versions the values are reported as zero.
 - Saving a rule does not automatically apply it until you use **Apply Rules** or the service detects a matching process.
 - ProBalance only downgrades CPU/IO priority; it never modifies affinity masks. Rule-managed priorities are excluded from ProBalance actions to keep the two engines from undoing each other.
+- ProBalance and Game Mode need the app open even when the service is installed; only rule enforcement continues in the background without it. The service lives in Session 0 and cannot observe the interactive foreground window on its own (see [Windows service](#windows-service)).
 
 ## Contributing
 

@@ -3,9 +3,14 @@
 //!
 //! Each [`tick`](ProBalanceRuntime::tick) (1 s) does:
 //! hot-reload config (mtime change = reload; no service restart needed
-//! when the GUI edits the config) -> sample -> foreground detection ->
-//! engine decision -> execute downgrade / restore -> write action log and
-//! status file.
+//! when the GUI edits the config) -> sample -> engine decision ->
+//! execute downgrade / restore -> write action log and status file.
+//!
+//! Foreground state is **passed in**, not detected here: the service lives in
+//! Session 0 and cannot call the session-local foreground APIs. The GUI relays
+//! its observation over the IPC bridge and the service hands a TTL-checked
+//! [`crate::monitor::ForegroundSnapshot`] to each tick. A stale snapshot means
+//! "no foreground known" and the engine stays idle - see issue #34.
 //!
 //! On construction it performs **startup reconciliation** (see
 //! [`Self::reconcile_orphans`]): if the previous run terminated
@@ -105,6 +110,7 @@ impl ProBalanceRuntime {
         base_dir: &Path,
         sampler: &mut crate::monitor::CpuSampler,
         protecting_rules: &[AffinityRule],
+        foreground: crate::monitor::ForegroundSnapshot,
     ) {
         // 1. Hot-reload config.
         let mtime = config_mtime(base_dir);
@@ -133,12 +139,13 @@ impl ProBalanceRuntime {
                     fg_pid: None,
                     fg_cpu_percent: None,
                     game_mode_active: false,
+                    foreground_signal: foreground.fresh,
                 },
             );
             return;
         }
 
-        // 3. Sample + foreground detection + decision.
+        // 3. Sample + foreground observation (relayed by the GUI) + decision.
         // The full path is only resolved when a Path-type protecting
         // rule exists (one extra query on the same handle, near-zero
         // cost). The common case with no Path rules passes false for
@@ -146,28 +153,56 @@ impl ProBalanceRuntime {
         let include_paths = protecting_rules
             .iter()
             .any(|r| r.match_type == crate::rule::MatchType::Path);
-        let samples = sampler.tick(include_paths).unwrap_or_default();
-        let foreground = crate::monitor::get_foreground_state();
-        let fg_pid = foreground.pid;
-        let game_mode_active =
-            self.engine.config().game_mode_enabled && foreground.fullscreen && fg_pid.is_some();
-        let now = unix_now();
-        let input = TickInput {
-            now_secs: now,
-            fg_pid,
-            samples: &samples,
-            protecting_rules,
+        // A failed or empty sampling round means "no information", not
+        // "every process exited". The sampler reports an enumeration
+        // failure as an empty list, and the engine reads an empty sample
+        // set as "all tracked processes are gone" - it would then emit an
+        // exit-restore for every downgraded process. The exit path never
+        // writes the original values back (the process is considered
+        // gone), so the downgrades would stay in place forever and the
+        // journal would record them as settled. Skip the decision tick
+        // instead and retry on the next round.
+        let samples = match sampler.tick(include_paths) {
+            Ok(samples) if !samples.is_empty() => Some(samples),
+            Ok(_) => {
+                eprintln!("ProBalance sampling returned no processes; skipping this round");
+                None
+            }
+            Err(e) => {
+                eprintln!("ProBalance sampling failed: {e}; skipping this round");
+                None
+            }
         };
+        let foreground_state = foreground.state;
+        let fg_pid = foreground_state.pid;
+        let game_mode_active = self.engine.config().game_mode_enabled
+            && foreground_state.fullscreen
+            && fg_pid.is_some();
+        let now = unix_now();
         self.reconcile_game_boost(base_dir, game_mode_active, fg_pid);
-        let decisions = self.engine.tick_with_game_mode(&input, game_mode_active);
+        let decisions = match &samples {
+            Some(samples) => {
+                let input = TickInput {
+                    now_secs: now,
+                    fg_pid,
+                    samples,
+                    protecting_rules,
+                };
+                self.engine.tick_with_game_mode(&input, game_mode_active)
+            }
+            None => Vec::new(),
+        };
 
         // 4. Execute.
         self.execute(base_dir, decisions);
 
         // 5. Write status.
-        let fg_cpu_percent = fg_pid
-            .and_then(|p| samples.iter().find(|s| s.pid == p))
-            .map(|s| s.cpu_percent);
+        let fg_cpu_percent = fg_pid.and_then(|p| {
+            samples
+                .as_ref()
+                .and_then(|samples| samples.iter().find(|s| s.pid == p))
+                .map(|s| s.cpu_percent)
+        });
         let _ = write_status(
             base_dir,
             &PbStatus {
@@ -178,6 +213,7 @@ impl ProBalanceRuntime {
                 fg_pid,
                 fg_cpu_percent,
                 game_mode_active,
+                foreground_signal: foreground.fresh,
             },
         );
     }
@@ -376,13 +412,44 @@ impl ProBalanceRuntime {
             let same_process = crate::procwin::get_process_name(pid)
                 .is_some_and(|current| crate::matcher::name_matches(&current, &name));
             if same_process {
+                // Read the current priorities before writing back. A field
+                // whose current value is no longer the one we downgraded to
+                // is not ours to restore: either we never changed it, or
+                // another owner has taken it over. The rule engine is such
+                // an owner - it re-applies a rule-managed priority every
+                // 5 seconds, and writing the pre-downgrade value back over
+                // it would make the two engines fight over the process
+                // forever. The rule wins: leave its value alone.
+                let current = crate::procwin::get_process_priorities(pid);
+                let cpu_is_ours = current
+                    .priority_class
+                    .map(|pc| pc == DOWNGRADE_PRIORITY_CLASS)
+                    .unwrap_or(true);
+                let io_is_ours = current
+                    .io_priority
+                    .map(|io| io == DOWNGRADE_IO_PRIORITY)
+                    .unwrap_or(true);
+
+                let mut wrote_something = false;
+                let mut had_value_to_write = false;
                 if let Some(pc) = originals.priority_class {
-                    let _ = crate::procwin::set_process_priority_class(pid, pc);
+                    had_value_to_write = true;
+                    if cpu_is_ours {
+                        wrote_something |=
+                            crate::procwin::set_process_priority_class(pid, pc).is_ok();
+                    }
                 }
                 if let Some(io) = originals.io_priority {
-                    let _ = crate::procwin::set_process_io_priority(pid, io);
+                    had_value_to_write = true;
+                    if io_is_ours {
+                        wrote_something |= crate::procwin::set_process_io_priority(pid, io).is_ok();
+                    }
                 }
-                written = true;
+                // Nothing to write means the process is already where it
+                // should be; a failed write must NOT be logged as a
+                // successful restore - the journal would then pair the
+                // downgrade away and crash recovery would never repair it.
+                written = wrote_something || !had_value_to_write;
             }
         }
         let _ = append_log(

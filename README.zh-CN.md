@@ -29,7 +29,7 @@ CPU Manager 是一款用于查看 CPU 拓扑、浏览 Windows 进程并管理其
 - 规则调度模式：**严格（Strict，硬亲和性）** 或 **软（Soft，CPU Sets，Win10 1803+；负载高峰时调度器可临时漂移到其他核心）**。
 - 规则可同时固定 **CPU 优先级类**、**I/O 优先级** 与 **内存优先级**。ProBalance 会自动将“由规则管理优先级”的进程排除在降级名单之外，避免与规则引擎相互干扰。
 - ProBalance 动态优化：当检测到前台进程 CPU 持续超过阈值时，对超过阈值的后台进程临时降级（CPU 优先级类 + I/O 优先级），并在争用解除、进程退出或功能关闭时自动恢复。GUI 中可查看实时状态、统计数据和 JSONL 行为日志。
-- 可安装 `CpumAffinityService` Windows 服务：该服务随系统自动启动，每 5 秒扫描一次匹配的进程，并同时承载 ProBalance 运行时；它同时充当**特权通道**，未提权的前台应用通过命名管道把受保护进程的修改交给它执行，全程无 UAC 弹窗。
+- 可安装 `CpumAffinityService` Windows 服务：该服务随系统自动启动，每 5 秒扫描一次匹配的进程，并同时承载 ProBalance 运行时；它同时充当**特权通道**，未提权的前台应用通过命名管道把受保护进程的修改交给它执行，全程无 UAC 弹窗。关闭应用后规则仍会继续生效；但 ProBalance 与游戏模式需要保持应用运行，因为只有交互式会话才能观察前台窗口（见下方「Windows 服务」一节）。
 - 规则与 ProBalance 配置保存在每用户数据目录 `%APPDATA%\com.open-nexa.cpum\`（`affinity_rules.json`、`probalance.json`、日志/状态文件）。旧位置（`%APPDATA%\com.eason.cpum`、`%ProgramData%\cpum`、`%APPDATA%\cpum`）下的文件会在安装或首次运行时自动迁移。
 
 ## 使用流程
@@ -38,7 +38,7 @@ CPU Manager 是一款用于查看 CPU 拓扑、浏览 Windows 进程并管理其
 2. 在 **进程** 标签页为单个进程立即设置亲和性与优先级，或切换到 **规则** 标签页保存可复用规则。
 3. 使用 **应用规则**，将所有已启用规则应用到当前运行的匹配进程。
 4. 在 **ProBalance** 标签页配置前台争用阈值与白名单，并查看实时状态/日志。
-5. 如果希望在登录或重启后也自动应用规则与 ProBalance，请在应用内安装 Windows 服务。
+5. 如果希望在登录或重启后也自动应用规则，请在应用内安装 Windows 服务。ProBalance 与游戏模式还需要应用本身保持运行，因为服务在 Session 0 中无法观察前台窗口。
 
 修改亲和性可能影响程序的响应速度和吞吐量。对于混合架构 CPU 或运行低延迟负载的电脑，请先谨慎测试掩码设置。ProBalance 仅降级后台进程的优先级，不会终止或硬绑定进程。
 
@@ -201,6 +201,8 @@ npx tauri build --bundles nsis
 
 应用可安装、启动、停止和卸载 `CpumAffinityService`。该服务以 `LocalSystem` 身份运行、自动启动，安装时会收到规则目录参数（`%APPDATA%\com.open-nexa.cpum`），并同时承载规则引擎与 ProBalance 运行时。服务会尝试启用 `SeDebugPrivilege`，以便向用户会话中的进程应用规则。
 
+**为什么 ProBalance / 游戏模式需要应用保持运行。** 服务运行在 Session 0，`GetForegroundWindow` 与 `SHQueryUserNotificationState` 只能描述本会话（没有交互窗口）的桌面，看不到交互式会话的前台窗口。应用每秒采样一次这两个 API，并通过同一条经过认证的命名管道把结果上报给服务；服务仍是持有 `LocalSystem` 权限的执行方，负责降级后台进程与提升前台优先级。超过 4 秒未更新的上报会被丢弃：应用关闭后，`probalance_status.json` 会显示 `foreground_signal: false`、`fg_pid: null`，引擎保持待机，而不会拿着过期的 PID 继续动作。规则执行不受影响，应用关闭后仍会在后台持续生效。
+
 提权范围仅限该操作：应用通过提权辅助进程调用 `sc.exe`，因此安装或卸载服务时只会弹出一次 UAC 提示，其余功能仍以普通权限运行。
 
 可在 PowerShell 中验证服务安装状态：
@@ -270,6 +272,7 @@ build.bat                         NSIS 发布构建脚本
 - 网络 I/O 计数器仅在 Win11 24H2+ 上可用（依赖 `NtQueryInformationProcess` / `ProcessNetworkIoCounters`），其他版本会显示为零。
 - 保存规则后不会立即自动应用；请使用 **应用规则**，或等待服务检测到匹配进程。
 - ProBalance 仅降级 CPU/IO 优先级，不会修改亲和性掩码；规则管理的优先级会被自动排除在 ProBalance 降级范围之外，避免两个引擎相互覆盖。
+- 即使安装了服务，ProBalance 与游戏模式仍需要应用保持运行；只有规则执行会在应用关闭后继续于后台生效。服务位于 Session 0，无法自行观察交互式会话的前台窗口（见上方「Windows 服务」一节）。
 
 ## 参与贡献
 

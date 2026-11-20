@@ -1,4 +1,4 @@
-import { ref, computed } from "vue";
+import { ref, computed, watch } from "vue";
 import type { ProcessInfo, CpuTopology, CpuScaleMode } from "../types";
 import { emptyDisplay, refreshDisplayCache, refreshCcdBars, parseMask } from "../types";
 import { listProcesses, listProcessesLight, listProcessesCached, setProcessAffinity, applyAffinityRules } from "../api";
@@ -29,6 +29,22 @@ export function useProcessManager(opts: {
     refreshDisplayCache(p, opts.cpuBaseline(), undefined, opts.cpuScaleMode(), opts.nproc());
     refreshCcdBars(p, opts.topology());
   }
+
+  // The CCD bars are derived from the CPU topology. With a cold cache the
+  // topology is not available yet (the real detection takes 1-2 s), so the
+  // bars are empty - and nothing recomputed them when the topology finally
+  // arrived, which left the Affinity column blank for every row until the
+  // user changed a mask or triggered a full refresh.
+  watch(
+    () => opts.topology(),
+    (topology) => {
+      if (!topology) return;
+      for (const p of processes.value) {
+        if (!p._display) p._display = emptyDisplay();
+        refreshCcdBars(p, topology);
+      }
+    },
+  );
 
   /** 3-stage bootstrap: cached -> light -> full (each independently try-caught). */
   async function bootstrap() {

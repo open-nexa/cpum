@@ -24,6 +24,28 @@ pub fn rules_file_path(base_dir: &Path) -> PathBuf {
     base_dir.join(RULES_FILE_NAME)
 }
 
+/// Atomic file write: write to a same-named `.tmp` file first, then rename
+/// to replace.
+///
+/// A direct `fs::write` truncates the target before writing, so a crash (or a
+/// power loss) in between leaves a half-written file behind. For the rule
+/// file that is not a cosmetic problem: the file no longer parses, and the
+/// service then applies **no rules at all** - silently, on every one of its
+/// 5-second ticks. Rust's `fs::rename` on Windows goes through
+/// `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`, which is an atomic switch from
+/// the reader's perspective.
+pub fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, contents).map_err(|e| format!("failed to write temp file: {e}"))?;
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp); // Clean up leftovers; the next write recreates it.
+            Err(format!("failed to atomically replace file: {e}"))
+        }
+    }
+}
+
 /// Input for a new rule (the service generates id / created_at).
 pub struct RuleDraft {
     pub process_name: String,
@@ -113,8 +135,7 @@ pub fn save_rules(base_dir: &Path, rules: &[AffinityRule]) -> Result<(), String>
     };
     let json = serde_json::to_string_pretty(&file)
         .map_err(|e| format!("failed to serialize rules: {e}"))?;
-    std::fs::write(rules_file_path(base_dir), json)
-        .map_err(|e| format!("failed to write rules file: {e}"))
+    atomic_write(&rules_file_path(base_dir), &json)
 }
 
 /// Quick "mask is non-zero" check (used by the GUI form for instant
@@ -201,6 +222,61 @@ mod tests {
     fn load_missing_file_returns_empty() {
         let dir = temp_dir();
         assert!(load_rules(&dir).unwrap().is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Regression: the rule file must be replaced atomically.
+    ///
+    /// A plain `fs::write` truncates the file before writing, so a crash in
+    /// between leaves an unparsable file behind - and an unparsable rule file
+    /// means the service applies **no rules at all**, silently, on every
+    /// tick. The temporary file must not survive a successful save either.
+    #[test]
+    fn save_replaces_the_file_atomically_and_leaves_no_temp_file() {
+        let dir = temp_dir();
+        let rules = parse_rules(V1_JSON).unwrap();
+        save_rules(&dir, &rules).unwrap();
+
+        let target = rules_file_path(&dir);
+        assert!(target.is_file(), "the rule file must exist after a save");
+        let leftover = target.with_extension("tmp");
+        assert!(
+            !leftover.exists(),
+            "the temp file must be renamed over the target, not left behind"
+        );
+
+        // The content on disk is complete and parsable.
+        let loaded = load_rules(&dir).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].process_name, "code");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Overwriting an existing rule file keeps it parsable (the replace path
+    /// must not leave a truncated file behind either).
+    #[test]
+    fn overwriting_an_existing_file_keeps_it_parsable() {
+        let dir = temp_dir();
+        let rules = parse_rules(V1_JSON).unwrap();
+        save_rules(&dir, &rules).unwrap();
+        let mut more = rules.clone();
+        more.push(AffinityRule {
+            id: "a2".into(),
+            process_name: "second".into(),
+            match_type: MatchType::Exact,
+            mask: "0x0F".into(),
+            group_masks: None,
+            enabled: true,
+            created_at: 200,
+            note: String::new(),
+            mode: RuleMode::Strict,
+            priority_class: None,
+            io_priority: None,
+            memory_priority: None,
+        });
+        save_rules(&dir, &more).unwrap();
+        assert_eq!(load_rules(&dir).unwrap().len(), 2);
         std::fs::remove_dir_all(&dir).ok();
     }
 

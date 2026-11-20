@@ -75,34 +75,50 @@ pub fn apply_rules_with_options(
     if active.is_empty() {
         return Ok(ApplyReport::default());
     }
+
+    // Validate every rule up front, but do NOT let one broken rule abort the
+    // whole pass. The service runs this every 5 seconds, and the rule file
+    // can hold a single invalid entry (hand-edited, or migrated from a
+    // legacy directory). Aborting would silently stop *every* rule from
+    // being enforced - the failure mode the periodic pass exists to
+    // prevent. An invalid rule is skipped and reported instead.
+    let mut applicable: Vec<(&AffinityRule, Vec<u64>)> = Vec::with_capacity(active.len());
     for r in &active {
-        rule::validate_rule(r)?;
+        match rule::validate_rule(r) {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("skipping invalid rule {}: {}", r.process_name, e);
+                continue;
+            }
+        }
+        let masks = match rule::rule_group_masks(r) {
+            Ok(masks) => masks,
+            Err(e) => {
+                eprintln!("skipping invalid rule {}: {}", r.process_name, e);
+                continue;
+            }
+        };
+        applicable.push((r, masks));
+    }
+    if applicable.is_empty() {
+        return Ok(ApplyReport::default());
     }
 
     // Only resolve full paths when a Path-type rule exists, to avoid
     // opening every process for nothing.
-    let need_paths = active.iter().any(|r| r.match_type == rule::MatchType::Path);
+    let need_paths = applicable
+        .iter()
+        .any(|(r, _)| r.match_type == rule::MatchType::Path);
     let processes = procwin::enumerate_processes(need_paths)?;
 
     let mut report = ApplyReport::default();
-    for r in &active {
-        let masks = r
-            .group_masks
-            .as_ref()
-            .map(|values| {
-                procwin::GroupMasks::from_hex_list(values)
-                    .expect("validate_rule guarantees valid masks")
-                    .0
-            })
-            .unwrap_or_else(|| {
-                vec![procwin::parse_hex_mask(&r.mask)
-                    .expect("validate_rule guarantees a valid mask")]
-            });
+    for (r, masks) in &applicable {
+        let r: &AffinityRule = r;
         for entry in &processes {
             if !rule_matches(r, &entry.name, entry.path.as_deref()) {
                 continue;
             }
-            match apply_one(r, entry.pid, &masks, force) {
+            match apply_one(r, entry.pid, masks, force) {
                 Ok(outcome) => {
                     if outcome.skipped {
                         report.skipped += 1;
@@ -308,5 +324,67 @@ mod apply_decision_tests {
     fn manages_nothing_means_already_correct() {
         let rule = rule_with(None, None, None);
         assert!(priorities_match(ProcessPriorities::default(), &rule));
+    }
+}
+
+#[cfg(test)]
+mod rule_isolation_tests {
+    use crate::engine::apply_rules_with_options;
+    use crate::rule::{AffinityRule, MatchType, RuleMode};
+
+    fn rule_with_mask(process_name: &str, mask: &str) -> AffinityRule {
+        AffinityRule {
+            id: "test".into(),
+            process_name: process_name.into(),
+            match_type: MatchType::Exact,
+            mask: mask.into(),
+            group_masks: None,
+            enabled: true,
+            created_at: 0,
+            note: String::new(),
+            mode: RuleMode::Strict,
+            priority_class: None,
+            io_priority: None,
+            memory_priority: None,
+        }
+    }
+
+    /// Regression: a single invalid rule must not abort the whole pass.
+    ///
+    /// The service applies the rules every 5 seconds. When the pass aborted
+    /// on the first invalid rule, one hand-edited entry in the rule file
+    /// silently stopped **every** rule from being enforced - the exact
+    /// failure the periodic pass exists to prevent.
+    #[test]
+    fn an_invalid_rule_does_not_abort_the_pass() {
+        let rules = vec![
+            rule_with_mask("good.exe", "0xF"),
+            rule_with_mask("broken.exe", "0xZZ"),
+            rule_with_mask("also-good.exe", "0x3"),
+        ];
+
+        // The broken rule is skipped; the pass still succeeds. (The valid
+        // rules may or may not match a live process - the point is that the
+        // pass returns Ok instead of Err.)
+        let report = apply_rules_with_options(&rules, false);
+        assert!(
+            report.is_ok(),
+            "an invalid rule must not fail the whole apply pass: {:?}",
+            report.err()
+        );
+    }
+
+    /// A rule whose mask is not parseable must be skipped, not panic.
+    #[test]
+    fn a_rule_with_an_unparsable_mask_is_skipped() {
+        let rules = vec![rule_with_mask("broken.exe", "not-a-mask")];
+        assert!(apply_rules_with_options(&rules, false).is_ok());
+    }
+
+    /// An all-zero mask is invalid too (it selects no CPU at all).
+    #[test]
+    fn an_all_zero_mask_is_skipped() {
+        let rules = vec![rule_with_mask("zero.exe", "0x0")];
+        assert!(apply_rules_with_options(&rules, false).is_ok());
     }
 }
